@@ -242,8 +242,8 @@ PROVIDERS = {
 }
 
 PROVIDER_MODELS = {
-    "groq":   ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
-    "gemini": ["gemini-1.5-flash", "gemini-1.5-pro"],
+    "groq":   ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+    "gemini": ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"],
     "claude": ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
 }
 

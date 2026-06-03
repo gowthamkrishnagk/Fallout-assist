@@ -47,14 +47,18 @@ def get_groq_quota() -> dict:
     return dict(_groq_quota)
 
 
-def generate(prompt: str, cfg: dict) -> dict:
-    """
-    Returns {"answer": str, "provider": str, "model": str}
-    cfg = config["llm"]
-    """
-    provider = cfg.get("provider", "local")
-    model    = cfg.get("model", "llama3.2:3b")
+# Default model per provider — used for fallback providers (the primary uses the
+# model from config). All are free-tier friendly.
+DEFAULT_MODELS = {
+    "groq":   "llama-3.1-8b-instant",
+    "gemini": "gemini-2.0-flash",
+    "claude": "claude-haiku-4-5-20251001",
+    "local":  "llama3.2:1b",
+}
 
+
+def _generate_one(prompt: str, provider: str, model: str, cfg: dict) -> dict:
+    model = model or DEFAULT_MODELS.get(provider, "")
     if provider == "local":
         return _local(prompt, model, cfg.get("ollama_url", "http://localhost:11434"))
     if provider == "groq":
@@ -64,6 +68,39 @@ def generate(prompt: str, cfg: dict) -> dict:
     if provider == "claude":
         return _claude(prompt, model)
     raise ValueError(f"Unknown provider: {provider}")
+
+
+def generate(prompt: str, cfg: dict) -> dict:
+    """Generate with automatic provider failover.
+
+    Tries the configured provider first, then each provider in cfg["fallback"]
+    (e.g. ["gemini", "local"]) until one succeeds — so a Groq rate-limit (429)
+    transparently rolls to Gemini, then to local Ollama (unlimited). The primary
+    uses cfg["model"]; fallbacks use cfg["fallback_models"][p] or DEFAULT_MODELS.
+
+    Returns {"answer", "provider", "model"} — provider/model reflect whoever
+    actually answered, so the UI shows which one was used. Raises only if ALL fail.
+    cfg = config["llm"]"""
+    primary  = cfg.get("provider", "local")
+    fallback = cfg.get("fallback", []) or []
+    order    = [primary] + [p for p in fallback if p != primary]
+
+    errors = []
+    for i, prov in enumerate(order):
+        model = cfg.get("model") if prov == primary else \
+                (cfg.get("fallback_models", {}) or {}).get(prov) or DEFAULT_MODELS.get(prov)
+        try:
+            result = _generate_one(prompt, prov, model, cfg)
+            if i > 0:
+                print(f"[LLM] failover -> answered by '{prov}' "
+                      f"(after {', '.join(order[:i])} failed)")
+            return result
+        except Exception as e:
+            errors.append(f"{prov}: {str(e)[:120]}")
+            nxt = f" -- trying {order[i+1]}" if i < len(order) - 1 else ""
+            print(f"[LLM] provider '{prov}' failed ({str(e)[:120]}){nxt}")
+
+    raise ValueError("All LLM providers failed: " + " | ".join(errors))
 
 
 def _local(prompt: str, model: str, ollama_url: str) -> dict:

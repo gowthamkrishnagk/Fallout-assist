@@ -13,8 +13,9 @@
     "docs_path": "trackers/workaround_docs"
   },
   "llm": {
-    "provider": "local",
-    "model": "llama3.2:1b",
+    "provider": "groq",
+    "model": "llama-3.1-8b-instant",
+    "fallback": ["gemini", "local"],
     "ollama_url": "http://localhost:11434"
   },
   "embed": {
