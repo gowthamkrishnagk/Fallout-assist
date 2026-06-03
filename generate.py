@@ -67,7 +67,7 @@ OPENAI_COMPAT = {
 # model from config). All are free-tier friendly.
 DEFAULT_MODELS = {
     "groq":     "llama-3.1-8b-instant",
-    "cerebras": "llama3.1-8b",
+    "cerebras": "gpt-oss-120b",
     "nvidia":   "meta/llama-3.1-8b-instruct",
     "claude":   "claude-haiku-4-5-20251001",
     "local":    "llama3.2:1b",

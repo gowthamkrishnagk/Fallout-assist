@@ -244,7 +244,7 @@ PROVIDERS = {
 
 PROVIDER_MODELS = {
     "groq":     ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
-    "cerebras": ["llama3.1-8b", "llama-3.3-70b"],
+    "cerebras": ["gpt-oss-120b", "zai-glm-4.7"],
     "nvidia":   ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct"],
     "claude":   ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
 }
