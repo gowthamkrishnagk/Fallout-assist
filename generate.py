@@ -158,8 +158,15 @@ def _openai_chat(prompt: str, model: str, provider: str) -> dict:
     if provider == "groq":
         _capture_groq_quota(resp)   # record remaining quota even on a 429
     if resp.status_code >= 400:
+        # Different providers shape errors differently: OpenAI/Groq use
+        # {"error":{"message":...}}, Cerebras/NVIDIA use {"detail":...} or
+        # {"message":...}. Try all so the real reason is never lost.
+        reason = ""
         try:
-            reason = resp.json().get("error", {}).get("message", "")
+            j   = resp.json()
+            err = j.get("error")
+            reason = (err.get("message") if isinstance(err, dict) else err) \
+                     or j.get("detail") or j.get("message") or ""
         except Exception:
             reason = resp.text[:200]
         raise ValueError(f"{provider} {resp.status_code}: {_redact(reason)}")
