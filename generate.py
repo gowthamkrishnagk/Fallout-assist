@@ -10,8 +10,15 @@ Supported providers:
 """
 
 import os
+import re
 import time
 import httpx
+
+
+def _redact(msg) -> str:
+    """Strip any `key=...` query value (Gemini puts the API key in the URL, so it
+    leaks into httpx error messages) before logging or showing it in the UI."""
+    return re.sub(r'key=[\w.\-]+', 'key=***', str(msg))
 
 # Trust the OS certificate store (covers corporate TLS-inspection root CAs).
 # Idempotent with app.py's injection; guarded so a missing dep never breaks import.
@@ -96,9 +103,10 @@ def generate(prompt: str, cfg: dict) -> dict:
                       f"(after {', '.join(order[:i])} failed)")
             return result
         except Exception as e:
-            errors.append(f"{prov}: {str(e)[:120]}")
+            msg = _redact(e)[:120]
+            errors.append(f"{prov}: {msg}")
             nxt = f" -- trying {order[i+1]}" if i < len(order) - 1 else ""
-            print(f"[LLM] provider '{prov}' failed ({str(e)[:120]}){nxt}")
+            print(f"[LLM] provider '{prov}' failed ({msg}){nxt}")
 
     raise ValueError("All LLM providers failed: " + " | ".join(errors))
 
@@ -236,19 +244,23 @@ def provider_status(cfg: dict) -> dict:
         code = e.response.status_code
         return _bad("Invalid or unauthorized API key" if code in (401, 403) else f"HTTP {code}")
     except Exception as e:
-        return _bad(str(e)[:100])
+        return _bad(_redact(e)[:100])
 
 
 def test_provider(cfg: dict) -> dict:
-    """Quick connectivity test — returns {ok, latency_ms, provider, model, response}."""
+    """Quick connectivity test for the SELECTED provider only — deliberately
+    bypasses the failover chain so a real error (bad model, missing key) surfaces
+    instead of silently succeeding via a fallback. Returns
+    {ok, latency_ms, provider, model, response}."""
     import time
-    start = time.time()
+    provider = cfg.get("provider", "local")
+    model    = cfg.get("model") or DEFAULT_MODELS.get(provider)
+    start    = time.time()
     try:
-        result  = generate("Reply in one word: ready", cfg)
+        result  = _generate_one("Reply in one word: ready", provider, model, cfg)
         elapsed = round((time.time() - start) * 1000)
         return {"ok": True, "latency_ms": elapsed,
                 "provider": result["provider"], "model": result["model"],
                 "response": result["answer"]}
     except Exception as e:
-        return {"ok": False, "error": str(e),
-                "provider": cfg.get("provider"), "model": cfg.get("model")}
+        return {"ok": False, "error": _redact(e), "provider": provider, "model": model}
