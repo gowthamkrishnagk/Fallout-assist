@@ -154,13 +154,20 @@ def _gemini(prompt: str, model: str) -> dict:
     api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set in .env")
-    m    = model or "gemini-1.5-flash"
+    m    = model or "gemini-2.0-flash"
     resp = httpx.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}",
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=60,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # Gemini puts the real reason (e.g. "API key not valid") in the body —
+        # surface it instead of a bare "400 Bad Request".
+        try:
+            reason = resp.json().get("error", {}).get("message", "")
+        except Exception:
+            reason = resp.text[:200]
+        raise ValueError(f"Gemini {resp.status_code}: {_redact(reason)}")
     answer = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     return {"answer": answer, "provider": "gemini", "model": m}
 
