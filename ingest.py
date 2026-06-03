@@ -41,6 +41,50 @@ def _get_jira(cfg: dict):
     return JIRA(server=url, basic_auth=(email, api_token))
 
 
+def _search_jql(jira, jql: str, fields: str, max_issues=None) -> list:
+    """Atlassian removed the old GET /rest/api/{2,3}/search (HTTP 410, CHANGE-2046).
+    This uses the replacement cursor-paginated /rest/api/2/search/jql endpoint and
+    wraps the raw results as jira Issue objects, so all downstream code is unchanged.
+    The /2/ base is deliberate: it keeps description/comment as plain text (the /3/
+    endpoint returns Atlassian Document Format JSON, which would break text parsing).
+
+    Pagination is by opaque nextPageToken (there is no startAt/total anymore)."""
+    from jira.resources import Issue
+    server = jira._options["server"].rstrip("/")
+    url    = f"{server}/rest/api/2/search/jql"
+    issues = []
+    token  = None
+    while True:
+        params = {"jql": jql, "maxResults": 100, "fields": fields}
+        if token:
+            params["nextPageToken"] = token
+        resp = jira._session.get(url, params=params)
+        resp.raise_for_status()
+        data  = resp.json()
+        batch = data.get("issues", [])
+        for raw in batch:
+            issues.append(Issue(jira._options, jira._session, raw=raw))
+            if max_issues and len(issues) >= max_issues:
+                return issues
+        token = data.get("nextPageToken")
+        if not token or not batch:
+            break
+    return issues
+
+
+def _approx_count(jira, jql: str):
+    """Fast count for previews — the new search API no longer returns a total.
+    Returns an int, or None if the endpoint is unavailable."""
+    try:
+        server = jira._options["server"].rstrip("/")
+        resp   = jira._session.post(f"{server}/rest/api/2/search/approximate-count",
+                                    json={"jql": jql})
+        resp.raise_for_status()
+        return resp.json().get("count")
+    except Exception:
+        return None
+
+
 def _clean(text: str) -> str:
     if not text:
         return ""
@@ -168,8 +212,8 @@ def ingest_jira(cfg: dict, progress_cb=None) -> dict:
 
         try:
             jira   = _get_jira(cfg)
-            issues = jira.search_issues(jql, maxResults=False,
-                                        fields="summary,description,status,comment,resolution,assignee")
+            issues = _search_jql(jira, jql,
+                                 "summary,description,status,comment,resolution,assignee")
             total  = len(issues)
             if progress_cb:
                 progress_cb(f"Fetched {total} tickets from Jira")
@@ -473,13 +517,14 @@ def _ticket_to_text(issue) -> str:
 def preview_jql(jql: str, cfg: dict) -> dict:
     try:
         jira   = _get_jira(cfg)
-        issues = jira.search_issues(jql, maxResults=False, fields="summary,status")
+        sample = _search_jql(jira, jql + " ORDER BY updated DESC", "summary,status", max_issues=5)
+        count  = _approx_count(jira, jql)
         return {
             "ok":    True,
-            "count": len(issues),
+            "count": count if count is not None else len(sample),
             "sample": [{"key": i.key, "summary": i.fields.summary,
                         "status": i.fields.status.name}
-                       for i in issues[:5]],
+                       for i in sample],
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
