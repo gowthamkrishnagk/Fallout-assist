@@ -54,13 +54,23 @@ def get_groq_quota() -> dict:
     return dict(_groq_quota)
 
 
+# OpenAI-compatible cloud providers — all speak the same /chat/completions schema
+# with Bearer auth, so one helper (_openai_chat) serves all of them. Free tier,
+# no card required: Groq, Cerebras, NVIDIA NIM.
+OPENAI_COMPAT = {
+    "groq":     {"url": "https://api.groq.com/openai/v1/chat/completions",     "key": "GROQ_API_KEY"},
+    "cerebras": {"url": "https://api.cerebras.ai/v1/chat/completions",         "key": "CEREBRAS_API_KEY"},
+    "nvidia":   {"url": "https://integrate.api.nvidia.com/v1/chat/completions", "key": "NVIDIA_API_KEY"},
+}
+
 # Default model per provider — used for fallback providers (the primary uses the
 # model from config). All are free-tier friendly.
 DEFAULT_MODELS = {
-    "groq":   "llama-3.1-8b-instant",
-    "gemini": "gemini-2.0-flash",
-    "claude": "claude-haiku-4-5-20251001",
-    "local":  "llama3.2:1b",
+    "groq":     "llama-3.1-8b-instant",
+    "cerebras": "llama3.1-8b",
+    "nvidia":   "meta/llama-3.1-8b-instruct",
+    "claude":   "claude-haiku-4-5-20251001",
+    "local":    "llama3.2:1b",
 }
 
 
@@ -68,10 +78,8 @@ def _generate_one(prompt: str, provider: str, model: str, cfg: dict) -> dict:
     model = model or DEFAULT_MODELS.get(provider, "")
     if provider == "local":
         return _local(prompt, model, cfg.get("ollama_url", "http://localhost:11434"))
-    if provider == "groq":
-        return _groq(prompt, model)
-    if provider == "gemini":
-        return _gemini(prompt, model)
+    if provider in OPENAI_COMPAT:
+        return _openai_chat(prompt, model, provider)
     if provider == "claude":
         return _claude(prompt, model)
     raise ValueError(f"Unknown provider: {provider}")
@@ -81,8 +89,8 @@ def generate(prompt: str, cfg: dict) -> dict:
     """Generate with automatic provider failover.
 
     Tries the configured provider first, then each provider in cfg["fallback"]
-    (e.g. ["gemini", "local"]) until one succeeds — so a Groq rate-limit (429)
-    transparently rolls to Gemini, then to local Ollama (unlimited). The primary
+    (e.g. ["cerebras", "local"]) until one succeeds — so a Groq rate-limit (429)
+    transparently rolls to Cerebras, then to local Ollama (unlimited). The primary
     uses cfg["model"]; fallbacks use cfg["fallback_models"][p] or DEFAULT_MODELS.
 
     Returns {"answer", "provider", "model"} — provider/model reflect whoever
@@ -132,44 +140,31 @@ def _local(prompt: str, model: str, ollama_url: str) -> dict:
         raise ValueError(f"Ollama error {e.response.status_code}: {e.response.text[:200]}")
 
 
-def _groq(prompt: str, model: str) -> dict:
-    api_key = os.getenv("GROQ_API_KEY", "")
+def _openai_chat(prompt: str, model: str, provider: str) -> dict:
+    """One client for every OpenAI-compatible provider (Groq / Cerebras / NVIDIA).
+    Surfaces the API's real error message (key-redacted) instead of a bare status."""
+    spec    = OPENAI_COMPAT[provider]
+    api_key = os.getenv(spec["key"], "")
     if not api_key:
-        raise ValueError("GROQ_API_KEY not set in .env")
+        raise ValueError(f"{spec['key']} not set in .env")
     resp = httpx.post(
-        "https://api.groq.com/openai/v1/chat/completions",
+        spec["url"],
         headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model or "llama-3.3-70b-versatile",
+        json={"model": model,
               "messages": [{"role": "user", "content": prompt}],
               "temperature": 0.2},
         timeout=60,
     )
-    _capture_groq_quota(resp)   # record remaining quota even on a 429
-    resp.raise_for_status()
-    answer = resp.json()["choices"][0]["message"]["content"].strip()
-    return {"answer": answer, "provider": "groq", "model": model}
-
-
-def _gemini(prompt: str, model: str) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not set in .env")
-    m    = model or "gemini-2.0-flash"
-    resp = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}",
-        json={"contents": [{"parts": [{"text": prompt}]}]},
-        timeout=60,
-    )
+    if provider == "groq":
+        _capture_groq_quota(resp)   # record remaining quota even on a 429
     if resp.status_code >= 400:
-        # Gemini puts the real reason (e.g. "API key not valid") in the body —
-        # surface it instead of a bare "400 Bad Request".
         try:
             reason = resp.json().get("error", {}).get("message", "")
         except Exception:
             reason = resp.text[:200]
-        raise ValueError(f"Gemini {resp.status_code}: {_redact(reason)}")
-    answer = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    return {"answer": answer, "provider": "gemini", "model": m}
+        raise ValueError(f"{provider} {resp.status_code}: {_redact(reason)}")
+    answer = resp.json()["choices"][0]["message"]["content"].strip()
+    return {"answer": answer, "provider": provider, "model": model}
 
 
 def _claude(prompt: str, model: str) -> dict:
@@ -224,19 +219,16 @@ def provider_status(cfg: dict) -> dict:
                 return _bad(f"Ollama running, but model '{model}' not installed — run: ollama pull {model}")
             return _ok("Ollama reachable")
 
-        env_var = {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY",
-                   "claude": "ANTHROPIC_API_KEY"}.get(provider, "")
+        env_var = (OPENAI_COMPAT.get(provider, {}).get("key")
+                   or {"claude": "ANTHROPIC_API_KEY"}.get(provider, ""))
         key = os.getenv(env_var, "")
         if not key:
             return _bad(f"No API key set ({env_var})")
 
-        if provider == "groq":
-            resp = httpx.get("https://api.groq.com/openai/v1/models",
-                             headers={"Authorization": f"Bearer {key}"}, timeout=6)
-        elif provider == "gemini":
-            resp = httpx.get(
-                f"https://generativelanguage.googleapis.com/v1beta/models?key={key}",
-                timeout=6)
+        if provider in OPENAI_COMPAT:
+            # OpenAI-compatible /models endpoint = cheap reachability + auth check
+            models_url = OPENAI_COMPAT[provider]["url"].replace("/chat/completions", "/models")
+            resp = httpx.get(models_url, headers={"Authorization": f"Bearer {key}"}, timeout=6)
         else:  # claude
             resp = httpx.get("https://api.anthropic.com/v1/models",
                              headers={"x-api-key": key, "anthropic-version": "2023-06-01"},

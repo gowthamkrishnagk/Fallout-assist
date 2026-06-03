@@ -482,11 +482,9 @@ async function loadLLMProviders() {
   cards.innerHTML = Object.entries(_providers).map(([key, p]) => `
     <div class="provider-card ${key === _currentProvider ? 'selected' : ''}" onclick="selectProvider('${key}')">
       <div class="provider-name">${p.label}</div>
-      <div class="privacy-badge ${p.privacy}">${
-        p.privacy === 'private'    ? '🔒 Fully local' :
-        p.privacy === 'governed'   ? '🔒 Company governed' :
-        '⚠ Sends data off-machine'
-      }</div>
+      ${p.privacy === 'private'
+        ? '<div class="privacy-badge private">🔒 Fully local</div>'
+        : '<div class="privacy-badge free">Free API</div>'}
     </div>`).join('');
 
   selectProvider(_currentProvider, r.current.model);

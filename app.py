@@ -235,16 +235,18 @@ def delete_document(doc_id: str):
 # ── LLM settings ─────────────────────────────────────────────────────────────
 
 PROVIDERS = {
-    "local":  {"label": "Local (Ollama)",    "privacy": "private",   "needs_key": False},
-    "groq":   {"label": "Groq",              "privacy": "sends_data", "needs_key": True},
-    "gemini": {"label": "Google Gemini",     "privacy": "sends_data", "needs_key": True},
-    "claude": {"label": "Claude (Anthropic)","privacy": "governed",   "needs_key": True},
+    "local":    {"label": "Local (Ollama)",     "privacy": "private",    "needs_key": False},
+    "groq":     {"label": "Groq",               "privacy": "sends_data", "needs_key": True},
+    "cerebras": {"label": "Cerebras",           "privacy": "sends_data", "needs_key": True},
+    "nvidia":   {"label": "NVIDIA NIM",         "privacy": "sends_data", "needs_key": True},
+    "claude":   {"label": "Claude (Anthropic)", "privacy": "governed",   "needs_key": True},
 }
 
 PROVIDER_MODELS = {
-    "groq":   ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
-    "gemini": ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"],
-    "claude": ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
+    "groq":     ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+    "cerebras": ["llama3.1-8b", "llama-3.3-70b"],
+    "nvidia":   ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct"],
+    "claude":   ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
 }
 
 
@@ -332,8 +334,8 @@ def llm_quota():
 
 
 def _key_env(provider: str) -> str:
-    return {"groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY",
-            "claude": "ANTHROPIC_API_KEY"}.get(provider, "")
+    return {"groq": "GROQ_API_KEY", "cerebras": "CEREBRAS_API_KEY",
+            "nvidia": "NVIDIA_API_KEY", "claude": "ANTHROPIC_API_KEY"}.get(provider, "")
 
 
 def _write_env(key: str, value: str):

@@ -15,7 +15,7 @@
   "llm": {
     "provider": "groq",
     "model": "llama-3.1-8b-instant",
-    "fallback": ["gemini", "local"],
+    "fallback": ["cerebras", "local"],
     "ollama_url": "http://localhost:11434"
   },
   "embed": {

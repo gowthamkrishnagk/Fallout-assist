@@ -179,6 +179,7 @@ h3   { font-size: 15px; font-weight: 600; color: #e2e8f0; margin-bottom: 10px; }
 .privacy-badge  { font-size: 12px; border-radius: 6px; padding: 3px 8px; display: inline-block; }
 .privacy-badge.private    { background: #14532d; color: #86efac; }
 .privacy-badge.governed   { background: #1e3a5f; color: #93c5fd; }
+.privacy-badge.free       { background: #1e293b; color: #94a3b8; }
 .privacy-badge.sends_data { background: #451a03; color: #fcd34d; }
 
 .key-hint    { font-size: 11px; color: #64748b; margin-top: 5px; }
