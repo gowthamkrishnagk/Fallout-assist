@@ -131,9 +131,10 @@ def _llm_rerank(step: str, error: str, candidates: list, cfg: dict) -> list:
 
     Best-effort and safe:
       - disabled via config (llm_rerank=false) → unchanged
-      - LLM down / unparseable output         → unchanged (cosine order kept)
-      - model explicitly finds none relevant  → keep only the top cosine hit so
-        the closest match still shows (as low-confidence), rather than wiping all.
+      - LLM down / unparseable / empty output → unchanged (cosine order kept).
+        Re-rank only ever REMOVES candidates the model explicitly names; it never
+        collapses the result set, so a weak model can't make results worse than
+        plain similarity search.
     Only step/error/summary are sent — never full comment bodies — so the call
     stays cheap."""
     # Nothing to disambiguate with 0 or 1 candidate — skip the LLM call entirely
@@ -170,8 +171,10 @@ def _llm_rerank(step: str, error: str, candidates: list, cfg: dict) -> list:
         kept = [candidates[i - 1] for i in idxs
                 if isinstance(i, int) and 1 <= i <= len(candidates)]
         if not kept:
-            print("[RERANK] model found no relevant match — keeping top cosine hit only")
-            return candidates[:1]
+            # Empty/unusable selection (common with tiny local models) — never
+            # collapse the result set; fall back to the full cosine ranking.
+            print("[RERANK] no usable selection — keeping cosine order")
+            return candidates
         print(f"[RERANK] kept {len(kept)}/{len(candidates)} candidates")
         return kept
     except Exception as e:
