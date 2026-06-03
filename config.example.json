@@ -1,0 +1,23 @@
+{
+  "jira": {
+    "url": "https://your-domain.atlassian.net",
+    "email": "",
+    "api_token": ""
+  },
+  "workaround_finder": {
+    "ingest_jql": "project = SAC AND status in (Resolved, Cancelled, Closed) AND \"Reporting Area[Dropdown]\" = \"Order Fallout\" AND updated >= -90d",
+    "top_k": 10,
+    "score_threshold": 0.7,
+    "llm_rerank": true,
+    "index_path": "trackers/workaround_index",
+    "docs_path": "trackers/workaround_docs"
+  },
+  "llm": {
+    "provider": "local",
+    "model": "llama3.2:1b",
+    "ollama_url": "http://localhost:11434"
+  },
+  "embed": {
+    "model": "all-MiniLM-L6-v2"
+  }
+}

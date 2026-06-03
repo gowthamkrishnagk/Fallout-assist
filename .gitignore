@@ -1,0 +1,21 @@
+# Secrets / local config (never commit) ─────────────────────────────
+.env
+config.json
+
+# Runtime data: vector index, uploaded docs, state (may hold customer data)
+trackers/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / tooling / agent
+.claude/
+.idea/
+.vscode/
+
+# Logs & scratch
+logs/
+*.log
+_*.py

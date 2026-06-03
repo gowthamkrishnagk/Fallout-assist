@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FalloutAssist</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="logo">⚡ FalloutAssist</div>
+
+  <nav>
+    <button class="nav-btn active" onclick="showTab('ask')">💬 Ask</button>
+    <button class="nav-btn" onclick="showTab('ingest')">⚙️ Ingest Jira</button>
+    <button class="nav-btn" onclick="showTab('docs')">📄 Documents</button>
+    <button class="nav-btn" onclick="showTab('llm')">🤖 LLM Settings</button>
+    <button class="nav-btn" onclick="showTab('settings')">🔧 Config</button>
+  </nav>
+
+  <div class="sidebar-status">
+    <div id="ai-status" class="ai-status" title="Active AI model">
+      <span class="ai-dot checking"></span>
+      <span id="ai-status-text">AI: checking…</span>
+    </div>
+    <div id="kb-status">Knowledge base: loading...</div>
+    <div id="run-status"></div>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- ── ASK TAB ─────────────────────────────────────────────── -->
+  <div id="tab-ask" class="tab active">
+    <h2>Find a Workaround</h2>
+    <p class="subtitle">Enter a Jira ticket ID or paste an error description. FalloutAssist searches past resolved tickets and your uploaded documents to suggest a fix.</p>
+
+    <textarea id="ask-query" class="input-text" rows="3" style="width:100%;margin-bottom:14px"
+      placeholder="Paste ticket ID (SAC-1234), step name, error description, or full error message…"></textarea>
+
+    <div class="ask-actions">
+      <button id="ask-btn" class="btn-primary" onclick="doAsk()">🔍 Find Workaround</button>
+      <label class="attach-label" title="Upload a document to the knowledge base">
+        📎 <span>Attach doc</span>
+        <input type="file" id="attach-file" accept=".pdf,.docx,.doc,.txt,.md,.xlsx" onchange="uploadAttachment(this)" style="display:none">
+      </label>
+      <span id="ask-spinner" class="spinner hidden"></span>
+    </div>
+
+    <div id="ask-result" class="hidden">
+      <div class="result-box">
+        <div class="result-header">
+          <span>💡 Suggested Workaround</span>
+          <span id="result-provider" class="badge"></span>
+        </div>
+        <div id="answer-text" class="answer-text"></div>
+      </div>
+
+      <div id="sources-box" class="sources-box hidden">
+        <div class="sources-header">Sources used</div>
+        <div id="sources-list"></div>
+      </div>
+    </div>
+
+    <div id="ask-error" class="error-box hidden"></div>
+  </div>
+
+  <!-- ── INGEST TAB ──────────────────────────────────────────── -->
+  <div id="tab-ingest" class="tab hidden">
+    <h2>Ingest Jira Tickets</h2>
+    <p class="subtitle">Pull resolved SAC Order Fallout tickets into the knowledge base.</p>
+
+    <label class="field-label">JQL Filter</label>
+    <textarea id="ingest-jql" class="input-text" rows="3" style="width:100%;font-family:monospace"></textarea>
+
+    <div class="ingest-actions">
+      <button class="btn-secondary" onclick="previewJQL()">👁 Preview count</button>
+      <button id="ingest-btn" class="btn-primary" onclick="startIngest()">▶ Start Ingest</button>
+      <span id="ingest-spinner" class="spinner hidden"></span>
+    </div>
+
+    <div id="preview-result" class="preview-box hidden"></div>
+
+    <div class="status-card" id="ingest-status-card">
+      <div class="status-row"><span>Total chunks indexed</span><strong id="st-chunks">—</strong></div>
+      <div class="status-row"><span>Jira tickets</span><strong id="st-tickets">—</strong></div>
+      <div class="status-row"><span>Documents</span><strong id="st-docs">—</strong></div>
+      <div class="status-row"><span>Last Jira sync</span><strong id="st-sync">—</strong></div>
+    </div>
+  </div>
+
+  <!-- ── DOCS TAB ────────────────────────────────────────────── -->
+  <div id="tab-docs" class="tab hidden">
+    <h2>Documents</h2>
+    <p class="subtitle">Upload PDF, Word, Excel, or text files. They are chunked, embedded, and searched alongside Jira tickets. Re-uploading the same filename replaces the old version automatically.</p>
+
+    <div class="upload-area" id="drop-zone"
+         ondragover="event.preventDefault()" ondrop="handleDrop(event)">
+      <div class="upload-icon">📂</div>
+      <div class="upload-drag-text">Drag &amp; drop files here</div>
+      <div class="upload-or">or</div>
+      <label class="btn-primary upload-choose-btn">
+        Choose Files
+        <input type="file" id="doc-upload" multiple accept=".pdf,.docx,.doc,.txt,.md,.xlsx" onchange="uploadDocs(this.files)" style="display:none">
+      </label>
+      <div class="upload-hint">PDF &nbsp;·&nbsp; Word &nbsp;·&nbsp; Excel &nbsp;·&nbsp; txt &nbsp;·&nbsp; md</div>
+    </div>
+
+    <div id="upload-progress"></div>
+
+    <div class="doc-list-header">
+      <h3>Indexed documents <span id="doc-count" class="muted" style="font-size:13px;font-weight:400"></span></h3>
+      <input id="doc-search" class="input-text doc-search-input" placeholder="🔍 Search by filename…" oninput="filterDocs()">
+    </div>
+
+    <div id="doc-list"><em class="muted">Loading...</em></div>
+  </div>
+
+  <!-- ── LLM SETTINGS TAB ───────────────────────────────────── -->
+  <div id="tab-llm" class="tab hidden">
+    <h2>LLM Settings</h2>
+    <p class="subtitle">Choose which model generates the workaround. Embeddings always run locally regardless of this setting.</p>
+
+    <div class="llm-grid">
+      <div id="provider-cards" class="provider-cards"></div>
+
+      <div class="llm-right">
+        <label class="field-label">Model</label>
+        <select id="llm-model" class="input-text" style="width:100%"></select>
+
+        <div id="api-key-row" class="hidden" style="margin-top:12px">
+          <label class="field-label">API Key</label>
+
+          <!-- Saved state: masked dots + Edit -->
+          <div id="llm-key-saved-row" class="masked-field-row hidden">
+            <span class="masked-value">••••••••••••••••••••••••</span>
+            <span class="masked-set-label">Key saved</span>
+            <button class="btn-secondary" style="padding:6px 14px;font-size:13px" onclick="editLLMKey()">Edit</button>
+          </div>
+
+          <!-- Edit / empty state: password input -->
+          <div id="llm-key-edit-row">
+            <input type="password" id="llm-api-key" class="input-text" placeholder="Paste your key here" style="width:100%">
+            <button id="llm-key-cancel-btn" class="btn-secondary hidden" style="margin-top:8px;font-size:13px;padding:6px 14px" onclick="cancelEditLLMKey()">✕ Cancel</button>
+            <div class="key-hint">Key is saved to .env on your machine — never committed to git.</div>
+          </div>
+        </div>
+
+        <div class="llm-actions">
+          <button class="btn-secondary" onclick="testLLM()">⚡ Test connection</button>
+          <button class="btn-primary" onclick="saveLLM()">Save</button>
+          <span id="llm-spinner" class="spinner hidden"></span>
+        </div>
+
+        <div id="llm-test-result" class="test-result hidden"></div>
+
+        <div class="rerank-row">
+          <label class="switch">
+            <input type="checkbox" id="llm-rerank-toggle" onchange="saveRerank(this.checked)">
+            <span class="slider"></span>
+          </label>
+          <div>
+            <div class="rerank-title">LLM relevance re-rank</div>
+            <div class="key-hint">Uses the model to filter out near-miss matches. Skipped when there's nothing to disambiguate; falls back to similarity ranking if the model is unavailable.</div>
+          </div>
+        </div>
+
+        <div id="llm-quota" class="llm-quota hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CONFIG TAB ─────────────────────────────────────────── -->
+  <div id="tab-settings" class="tab hidden">
+    <h2>Configuration</h2>
+
+    <div class="config-section">
+      <h3>Jira Connection</h3>
+
+      <label class="field-label">Jira Email</label>
+      <input id="cfg-jira-email" class="input-text" style="width:100%" placeholder="you@company.com">
+
+      <label class="field-label" style="margin-top:16px">Jira API Token</label>
+
+      <!-- Saved state: show masked dots + Edit button -->
+      <div id="token-saved-row" class="masked-field-row hidden">
+        <span class="masked-value">••••••••••••••••••••••••</span>
+        <span class="masked-set-label">Token saved</span>
+        <button class="btn-secondary" style="padding:6px 14px;font-size:13px" onclick="editToken()">Edit</button>
+      </div>
+
+      <!-- Edit / empty state: show password input -->
+      <div id="token-edit-row">
+        <input type="password" id="cfg-jira-token" class="input-text" style="width:100%" placeholder="Paste token (saved to .env)">
+        <button id="token-cancel-btn" class="btn-secondary hidden" style="margin-top:8px;font-size:13px;padding:6px 14px" onclick="cancelEditToken()">✕ Cancel</button>
+      </div>
+    </div>
+
+    <div class="config-section">
+      <h3>Search Settings</h3>
+      <label class="field-label">Top-K results (how many sources to retrieve)</label>
+      <input type="number" id="cfg-topk" class="input-text" style="width:80px" min="1" max="20">
+    </div>
+
+    <div class="config-section">
+      <h3>Ollama URL</h3>
+      <input id="cfg-ollama-url" class="input-text" style="width:100%" placeholder="http://localhost:11434">
+    </div>
+
+    <button class="btn-primary" onclick="saveConfig()">Save Config</button>
+    <span id="cfg-saved" class="hidden" style="color:#22c55e;margin-left:12px">✓ Saved</span>
+  </div>
+
+</div>
+
+<script>
+// ── Tab switching ────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.add('hidden'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.remove('hidden');
+  event.currentTarget.classList.add('active');
+  if (name === 'ingest')  loadIngestStatus();
+  if (name === 'docs')    loadDocs();
+  if (name === 'llm')   { loadLLMProviders(); loadLLMQuota(); }
+  if (name === 'settings') loadConfig();
+}
+
+// ── ASK ──────────────────────────────────────────────────────────────────────
+async function doAsk() {
+  const raw = document.getElementById('ask-query').value.trim();
+  if (!raw) { alert('Enter a ticket ID, step name, or error description.'); return; }
+
+  // Auto-detect: if input looks like a Jira ticket ID send as ticket_id, else as query_text
+  const isTicketId = /^[A-Z]+-\d+$/i.test(raw);
+  let ticketId  = isTicketId ? raw.toUpperCase() : '';
+  let queryText = isTicketId ? '' : raw;
+
+  setLoading('ask', true);
+  hideEl('ask-result'); hideEl('ask-error');
+
+  const r = await post('/api/ask', { ticket_id: ticketId, query_text: queryText });
+  setLoading('ask', false);
+  loadLLMQuota();   // a query may have spent Groq quota — refresh the snapshot
+
+  if (!r.ok) { showError('ask-error', r.error || r.detail || 'Unknown error'); return; }
+
+  // Mode badge
+  const modeBadge = {
+    strong_match:   '✅ Strong match (≥' + Math.round((r.threshold||0.8)*100) + '%)',
+    low_confidence: '⚠️ Low confidence (best: ' + Math.round((r.best_score||0)*100) + '%)',
+    no_data:        '❌ No data',
+  }[r.mode] || '';
+
+  document.getElementById('answer-text').textContent = r.answer;
+  document.getElementById('result-provider').textContent =
+    modeBadge + (r.provider && r.provider !== 'direct_match' ? `  •  ${r.provider}/${r.model}` : '');
+  showEl('ask-result');
+
+  // Strong matched comments — show as primary sources
+  const allSources = [...(r.strong || []), ...(r.context || [])];
+  if (allSources.length) {
+    const list = document.getElementById('sources-list');
+    list.innerHTML = allSources.map(s => {
+      const isStrong = (r.strong||[]).includes(s);
+      const pct      = Math.round(s.score * 100);
+      const badge    = isStrong
+        ? `<span class="score-strong">${pct}% match</span>`
+        : `<span class="score-weak">${pct}% match</span>`;
+
+      const uid = `src-${Math.random().toString(36).slice(2,8)}`;
+      if (s.type === 'ticket') {
+        const hasDesc = s.description || s.error || s.step;
+        // Skip labels already shown as dedicated rows (Step, Error)
+        const _skipLabels = new Set(['step','failed step','error','error description']);
+        const _cleanVal = v => v.replace(/\*+/g,'').replace(/\b[0-9][A-Za-z0-9]{14,17}\b/g,'').replace(/\(\s*\)/g,'').replace(/\s+/g,' ').trim();
+        const cleanStep  = s.step  ? _cleanVal(s.step)  : '';
+        const cleanError = s.error ? _cleanVal(s.error) : '';
+        const descHtml = hasDesc ? `
+          <div class="source-desc hidden" id="${uid}-desc">
+            ${cleanStep  ? `<div class="desc-row"><span class="desc-label">Step</span><span>${escHtml(cleanStep)}</span></div>` : ''}
+            ${cleanError ? `<div class="desc-row"><span class="desc-label">Error</span><span>${escHtml(cleanError)}</span></div>` : ''}
+            ${s.description ? s.description.split('\n').map(l => {
+                const col = l.indexOf(':');
+                if (col === -1) return '';
+                const label = l.slice(0, col).trim();
+                if (_skipLabels.has(label.toLowerCase())) return '';
+                const val = _cleanVal(l.slice(col + 1));
+                return val ? `<div class="desc-row"><span class="desc-label">${escHtml(label)}</span><span>${escHtml(val)}</span></div>` : '';
+              }).filter(Boolean).join('') : ''}
+          </div>` : '';
+
+        return `<div class="source-item ${isStrong ? 'source-strong' : ''}">
+          <div class="source-header">
+            <a href="${s.url}" target="_blank">${escHtml(s.key)}</a>
+            <span class="source-summary">${escHtml(s.summary)}</span>
+            ${badge}
+            ${hasDesc ? `<button class="expand-btn" onclick="toggleDesc('${uid}',this)">▼ Details</button>` : ''}
+          </div>
+          ${descHtml}
+          <div class="source-assignee">👤 ${escHtml(s.author || s.assignee)}</div>
+          <div class="source-comment">${escHtml(s.comment)}</div>
+        </div>`;
+      }
+      return `<div class="source-item ${isStrong ? 'source-strong' : ''}">
+        📄 ${escHtml(s.filename)} ${badge}
+        <div class="source-comment">${escHtml(s.comment)}</div>
+      </div>`;
+    }).join('');
+    showEl('sources-box');
+  }
+}
+
+async function uploadAttachment(input) {
+  const file = input.files[0]; if (!file) return;
+  const fd   = new FormData(); fd.append('file', file);
+  const r    = await fetch('/api/documents', { method: 'POST', body: fd }).then(x => x.json());
+  if (r.ok) alert(`✅ Indexed ${r.chunks} chunks from "${r.filename}" — now searchable.`);
+  else      alert(`❌ ${r.error}`);
+  input.value = '';
+}
+
+// ── INGEST ───────────────────────────────────────────────────────────────────
+async function loadIngestStatus() {
+  const r = await get('/api/ingest/status');
+  document.getElementById('st-chunks').textContent  = r.total_chunks ?? '—';
+  document.getElementById('st-tickets').textContent = r.jira_count   ?? '—';
+  document.getElementById('st-docs').textContent    = r.doc_count    ?? '—';
+  document.getElementById('st-sync').textContent    = r.last_jira_sync ? new Date(r.last_jira_sync).toLocaleString() : 'Never';
+  document.getElementById('kb-status').textContent  = `KB: ${r.total_chunks ?? 0} chunks`;
+
+  const btn = document.getElementById('ingest-btn');
+  const spinner = document.getElementById('ingest-spinner');
+  if (r.running) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Ingesting…';
+    spinner.classList.remove('hidden');
+    document.getElementById('run-status').textContent = '🔄 Ingesting...';
+    setTimeout(loadIngestStatus, 3000);
+  } else {
+    btn.disabled = false;
+    btn.textContent = '▶ Start Ingest';
+    spinner.classList.add('hidden');
+    document.getElementById('run-status').textContent = '';
+  }
+}
+
+async function loadIngestJQL() {
+  const r = await get('/api/config');
+  document.getElementById('ingest-jql').value = r.jql || '';
+}
+
+async function previewJQL() {
+  const jql = document.getElementById('ingest-jql').value.trim();
+  if (!jql) { alert('Enter a JQL query.'); return; }
+  const el = document.getElementById('preview-result');
+  el.textContent = 'Checking...'; showEl('preview-result');
+  const r = await post('/api/ingest/preview', { jql });
+  if (r.ok) {
+    el.innerHTML = `<strong>${r.count} tickets match.</strong> Sample:<br>` +
+      (r.sample || []).map(s => `• <code>${s.key}</code> — ${escHtml(s.summary)} (${s.status})`).join('<br>');
+  } else {
+    el.innerHTML = `<span style="color:#ef4444">Error: ${escHtml(r.error)}</span>`;
+  }
+}
+
+async function startIngest() {
+  const jql = document.getElementById('ingest-jql').value.trim();
+  if (!jql) { alert('Enter a JQL query.'); return; }
+  const btn = document.getElementById('ingest-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Ingesting…';
+  document.getElementById('ingest-spinner').classList.remove('hidden');
+  const r = await post('/api/ingest/start', { jql });
+  if (r.status === 'already_running') {
+    alert('Ingest already running.');
+    loadIngestStatus();
+    return;
+  }
+  if (!r.ok) {
+    alert(`Error: ${r.error}`);
+    btn.disabled = false;
+    btn.textContent = '▶ Start Ingest';
+    document.getElementById('ingest-spinner').classList.add('hidden');
+    return;
+  }
+  loadIngestStatus();
+}
+
+// ── DOCS ─────────────────────────────────────────────────────────────────────
+let _allDocs = [];
+
+async function loadDocs() {
+  const r = await get('/api/documents');
+  _allDocs = (r.documents || []).sort((a, b) => new Date(b.indexed_at) - new Date(a.indexed_at));
+  renderDocs(_allDocs);
+}
+
+function filterDocs() {
+  const q = document.getElementById('doc-search').value.toLowerCase().trim();
+  renderDocs(q ? _allDocs.filter(d => d.filename.toLowerCase().includes(q)) : _allDocs);
+}
+
+function renderDocs(docs) {
+  const el    = document.getElementById('doc-list');
+  const count = document.getElementById('doc-count');
+  const total = _allDocs.length;
+  const shown = docs.length;
+  count.textContent = total === shown
+    ? `— ${total} document${total !== 1 ? 's' : ''}`
+    : `— ${shown} of ${total}`;
+
+  if (!_allDocs.length) {
+    el.innerHTML = '<em class="muted">No documents indexed yet. Upload a file above.</em>';
+    return;
+  }
+  if (!docs.length) {
+    el.innerHTML = '<em class="muted">No documents match your search.</em>';
+    return;
+  }
+
+  el.innerHTML = docs.map(d => {
+    const safeId   = escHtml(d.doc_id);
+    const safeName = escHtml(d.filename);
+    const date     = new Date(d.indexed_at).toLocaleString();
+    const ext      = d.filename.split('.').pop().toLowerCase();
+    const icon     = { pdf:'📕', docx:'📘', doc:'📘', xlsx:'📗', xls:'📗', txt:'📄', md:'📄' }[ext] || '📄';
+    return `
+    <div class="doc-item" id="doc-${safeId}">
+      <div class="doc-info">
+        <div class="doc-name">${icon} ${safeName}</div>
+        <div class="doc-meta">${d.chunks} chunk${d.chunks !== 1 ? 's' : ''} &nbsp;·&nbsp; Indexed ${date}</div>
+      </div>
+      <button class="btn-danger-sm" onclick="deleteDoc('${safeId}', '${safeName.replace(/'/g,"\\'")}')">🗑 Remove</button>
+    </div>`;
+  }).join('');
+}
+
+async function uploadDocs(files) {
+  const progress = document.getElementById('upload-progress');
+  for (const file of files) {
+    progress.innerHTML = `<div class="uploading">⏳ Uploading ${escHtml(file.name)}…</div>`;
+    const fd = new FormData(); fd.append('file', file);
+    const r  = await fetch('/api/documents', { method: 'POST', body: fd }).then(x => x.json());
+    progress.innerHTML = r.ok
+      ? `<div class="upload-ok">✅ ${escHtml(file.name)} — ${r.chunks} chunks indexed</div>`
+      : `<div class="upload-err">❌ ${escHtml(file.name)}: ${escHtml(r.error)}</div>`;
+  }
+  document.getElementById('doc-search').value = '';
+  loadDocs();
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  uploadDocs(e.dataTransfer.files);
+}
+
+async function deleteDoc(docId, filename) {
+  if (!confirm(`Remove "${filename}" from the knowledge base?\n\nAll its chunks will be deleted from the search index.`)) return;
+  const row = document.getElementById(`doc-${docId}`);
+  if (row) { row.style.opacity = '0.4'; row.style.pointerEvents = 'none'; }
+  await fetch(`/api/documents/${docId}`, { method: 'DELETE' }).then(x => x.json());
+  _allDocs = _allDocs.filter(d => d.doc_id !== docId);
+  filterDocs();
+}
+
+// ── LLM SETTINGS ─────────────────────────────────────────────────────────────
+let _providers = {}; let _allModels = {}; let _currentProvider = 'local';
+
+let _providerHasKey = {};
+
+async function loadLLMProviders() {
+  const r = await get('/api/llm/providers');
+  _providers    = r.providers;
+  _allModels    = r.models;
+  _providerHasKey = r.has_keys || {};
+  _currentProvider = r.current.provider;
+  document.getElementById('llm-rerank-toggle').checked = !!r.rerank;
+
+  const cards = document.getElementById('provider-cards');
+  cards.innerHTML = Object.entries(_providers).map(([key, p]) => `
+    <div class="provider-card ${key === _currentProvider ? 'selected' : ''}" onclick="selectProvider('${key}')">
+      <div class="provider-name">${p.label}</div>
+      <div class="privacy-badge ${p.privacy}">${
+        p.privacy === 'private'    ? '🔒 Fully local' :
+        p.privacy === 'governed'   ? '🔒 Company governed' :
+        '⚠ Sends data off-machine'
+      }</div>
+    </div>`).join('');
+
+  selectProvider(_currentProvider, r.current.model);
+}
+
+function selectProvider(key, preselectedModel) {
+  _currentProvider = key;
+  document.querySelectorAll('.provider-card').forEach(c => c.classList.remove('selected'));
+  const card = document.querySelector(`.provider-card:nth-child(${Object.keys(_providers).indexOf(key)+1})`);
+  if (card) card.classList.add('selected');
+
+  const models = _allModels[key] || [];
+  const sel    = document.getElementById('llm-model');
+  sel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+  if (preselectedModel) sel.value = preselectedModel;
+
+  const needsKey = _providers[key]?.needs_key;
+  document.getElementById('api-key-row').classList.toggle('hidden', !needsKey);
+  if (needsKey) _applyLLMKeyState(!!_providerHasKey[key], false);
+}
+
+// Masked "Key saved" vs editable input, mirroring the Jira token field.
+function _applyLLMKeyState(isSaved, isEditing) {
+  document.getElementById('llm-api-key').value = '';
+  if (isSaved && !isEditing) {
+    showEl('llm-key-saved-row');
+    hideEl('llm-key-edit-row');
+    hideEl('llm-key-cancel-btn');
+  } else {
+    hideEl('llm-key-saved-row');
+    showEl('llm-key-edit-row');
+    if (isSaved) showEl('llm-key-cancel-btn'); else hideEl('llm-key-cancel-btn');
+  }
+}
+
+function editLLMKey() {
+  _applyLLMKeyState(true, true);
+  document.getElementById('llm-api-key').focus();
+}
+
+function cancelEditLLMKey() {
+  _applyLLMKeyState(true, false);
+}
+
+async function saveRerank(enabled) {
+  const r = await post('/api/llm/rerank', { enabled });
+  if (!r.ok) alert('Could not update re-rank setting');
+}
+
+// ── Groq quota (from captured rate-limit headers — costs nothing) ────────────
+function _fmtNum(n) {
+  n = Number(n);
+  if (!isFinite(n)) return '—';
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K' : String(n);
+}
+function _quotaBar(remaining, limit) {
+  const r = Number(remaining), l = Number(limit);
+  const pct = (isFinite(r) && isFinite(l) && l > 0) ? Math.max(0, Math.min(100, r / l * 100)) : 0;
+  const color = pct > 40 ? '#22c55e' : pct > 15 ? '#eab308' : '#ef4444';
+  return `<div class="quota-track"><div class="quota-fill" style="width:${pct}%;background:${color}"></div></div>`;
+}
+async function loadLLMQuota() {
+  const el = document.getElementById('llm-quota');
+  if (!el) return;
+  let r;
+  try { r = await get('/api/llm/quota'); } catch (e) { el.classList.add('hidden'); return; }
+  const q = r.quota || {};
+  if (r.provider !== 'groq' || !q.updated) { el.classList.add('hidden'); return; }
+
+  const ago = Math.max(0, Math.round((Date.now() / 1000) - q.updated));
+  const agoStr = ago < 60 ? `${ago}s ago` : `${Math.round(ago / 60)}m ago`;
+  el.innerHTML = `
+    <div class="quota-head">Groq quota <span class="muted">· updated ${agoStr}</span></div>
+    <div class="quota-line">
+      <span>Requests / day</span>
+      <span>${_fmtNum(q.remaining_requests)} / ${_fmtNum(q.limit_requests)} left${q.reset_requests ? ` · resets ${q.reset_requests}` : ''}</span>
+    </div>
+    ${_quotaBar(q.remaining_requests, q.limit_requests)}
+    <div class="quota-line">
+      <span>Tokens / min</span>
+      <span>${_fmtNum(q.remaining_tokens)} / ${_fmtNum(q.limit_tokens)} left${q.reset_tokens ? ` · resets ${q.reset_tokens}` : ''}</span>
+    </div>
+    ${_quotaBar(q.remaining_tokens, q.limit_tokens)}`;
+  el.classList.remove('hidden');
+}
+
+async function testLLM() {
+  setLoading('llm', true);
+  const r  = await post('/api/llm/test', {});
+  const el = document.getElementById('llm-test-result');
+  setLoading('llm', false);
+  el.className = 'test-result ' + (r.ok ? 'ok' : 'fail');
+  el.textContent = r.ok
+    ? `✅ ${r.provider}/${r.model} responded in ${r.latency_ms}ms: "${r.response}"`
+    : `❌ ${r.error}`;
+  showEl('llm-test-result');
+  loadLLMStatus();   // reflect the just-tested connection in the sidebar
+}
+
+async function saveLLM() {
+  const provider = _currentProvider;
+  const model    = document.getElementById('llm-model').value;
+  const api_key  = document.getElementById('llm-api-key').value.trim();
+  const r = await post('/api/llm/config', { provider, model, api_key });
+  if (r.ok) {
+    if (api_key) _providerHasKey[provider] = true;   // a new key was just stored
+    if (_providers[provider]?.needs_key) _applyLLMKeyState(!!_providerHasKey[provider], false);
+    alert(`✅ Saved: ${provider} / ${model}`);
+    loadLLMStatus();
+  } else {
+    alert(`❌ ${r.error}`);
+  }
+}
+
+// ── Active-AI status indicator (sidebar) ─────────────────────────────────────
+const _PROVIDER_LABELS = { local: 'Local (Ollama)', groq: 'Groq', gemini: 'Gemini', claude: 'Claude' };
+
+async function loadLLMStatus() {
+  const dot  = document.querySelector('#ai-status .ai-dot');
+  const text = document.getElementById('ai-status-text');
+  const wrap = document.getElementById('ai-status');
+  try {
+    const r     = await get('/api/llm/status');
+    const label = _PROVIDER_LABELS[r.provider] || r.provider || 'AI';
+    dot.className  = 'ai-dot ' + (r.connected ? 'online' : 'offline');
+    text.textContent = `${label} · ${r.model || '—'}`;
+    wrap.title = (r.connected ? '🟢 Connected' : '🔴 Disconnected') +
+                 (r.detail ? ` — ${r.detail}` : '');
+  } catch (e) {
+    dot.className  = 'ai-dot offline';
+    text.textContent = 'AI: unavailable';
+    wrap.title = 'Could not reach the server';
+  }
+}
+
+// ── CONFIG ───────────────────────────────────────────────────────────────────
+let _hasToken = false;
+
+async function loadConfig() {
+  const r = await get('/api/config');
+  document.getElementById('cfg-topk').value       = r.top_k     || 10;
+  document.getElementById('ingest-jql').value     = r.jql       || '';
+  document.getElementById('cfg-jira-email').value = r.jira_email || '';
+  document.getElementById('cfg-ollama-url').value = r.ollama_url || '';
+  _hasToken = r.has_token;
+  _applyTokenState(_hasToken, false);
+}
+
+function _applyTokenState(isSaved, isEditing) {
+  if (isSaved && !isEditing) {
+    showEl('token-saved-row');
+    hideEl('token-edit-row');
+    hideEl('token-cancel-btn');
+  } else {
+    hideEl('token-saved-row');
+    showEl('token-edit-row');
+    if (isSaved) showEl('token-cancel-btn'); else hideEl('token-cancel-btn');
+  }
+}
+
+function editToken() {
+  document.getElementById('cfg-jira-token').value = '';
+  _applyTokenState(true, true);
+  document.getElementById('cfg-jira-token').focus();
+}
+
+function cancelEditToken() {
+  document.getElementById('cfg-jira-token').value = '';
+  _applyTokenState(true, false);
+}
+
+async function saveConfig() {
+  const body = {
+    jql:        document.getElementById('ingest-jql').value.trim(),
+    top_k:      parseInt(document.getElementById('cfg-topk').value),
+    jira_email: document.getElementById('cfg-jira-email').value.trim(),
+    ollama_url: document.getElementById('cfg-ollama-url').value.trim(),
+  };
+  const token = document.getElementById('cfg-jira-token').value.trim();
+  if (token) body.jira_api_token = token;
+
+  const r = await post('/api/config', body);
+  if (r.ok) {
+    if (token) { _hasToken = true; }
+    _applyTokenState(_hasToken, false);
+    const s = document.getElementById('cfg-saved');
+    s.classList.remove('hidden'); setTimeout(() => s.classList.add('hidden'), 2500);
+  }
+}
+
+function toggleDesc(uid, btn) {
+  const el = document.getElementById(`${uid}-desc`);
+  const open = el.classList.toggle('hidden');
+  btn.textContent = open ? '▼ Details' : '▲ Details';
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+async function get(url)       { return fetch(url).then(x => x.json()); }
+async function post(url, body){ return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json()); }
+function showEl(id)  { document.getElementById(id).classList.remove('hidden'); }
+function hideEl(id)  { document.getElementById(id).classList.add('hidden'); }
+function setLoading(scope, on) {
+  document.getElementById(`${scope}-spinner`).classList.toggle('hidden', !on);
+  const btn = document.getElementById(`${scope}-btn`);
+  if (btn) btn.disabled = on;
+}
+function showError(id, msg) { const el=document.getElementById(id); el.textContent=msg; showEl(id); }
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.onload = () => {
+  loadIngestStatus();
+  loadIngestJQL();
+  loadLLMStatus();
+};
+setInterval(loadIngestStatus, 5000);
+setInterval(loadLLMStatus, 30000);   // slower poll — avoids spamming cloud APIs
+</script>
+</body>
+</html>
