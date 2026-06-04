@@ -255,8 +255,9 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
             # Full rebuild → recreate the ticket collections from scratch (docs
             # untouched) so stale chunks can't linger AND the collections get
             # correct HNSW search_ef instead of the small legacy default.
-            if full:
-                vectordb.reset_ticket_collections(index_path)
+            # NOTE: a full rebuild does NOT wipe here. We recreate the collections
+            # only just before writing the freshly-embedded chunks (below), so a
+            # failure during fetch/embed can never leave the index empty.
 
             # Prune tickets we indexed before but that no longer match the JQL.
             # Only in full-scope mode — a windowed fetch sees just a recent slice,
@@ -282,10 +283,12 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                 progress_cb(f"{len(changed)} new/changed, {up_to_date} unchanged, "
                             f"{pruned} pruned")
 
-            # Upsert: clear any existing chunks for changed tickets before re-adding
-            # (no-op for brand-new tickets) so we never duplicate.
-            for issue, _ in changed:
-                vectordb.delete_ticket_by_source(issue.key, index_path)
+            # Upsert (incremental only): clear changed tickets' chunks before
+            # re-adding so we never duplicate. A full rebuild recreates the whole
+            # collection set below instead, so it skips this.
+            if not full:
+                for issue, _ in changed:
+                    vectordb.delete_ticket_by_source(issue.key, index_path)
 
             ids = []; step_texts = []; error_texts = []; display_texts = []; metas = []
             skipped = 0
@@ -379,6 +382,11 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
 
                 if progress_cb:
                     progress_cb("Storing fresh ticket chunks...")
+                # Full rebuild: wipe + recreate the collections HERE — only now that
+                # the new chunks are embedded and ready — so the empty window is a
+                # split second and a mid-run failure never leaves the KB empty.
+                if full:
+                    vectordb.reset_ticket_collections(index_path)
                 vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
 
             _save_state({"last_jira_sync": datetime.utcnow().isoformat(),
