@@ -69,6 +69,9 @@ def find_workarounds(query: str, cfg: dict) -> dict:
     embed_model = cfg["embed"]["model"]
     top_k       = wf.get("top_k", 10)
     threshold   = wf.get("score_threshold", DEFAULT_THRESHOLD)
+    # Error is the differentiator (the step name is shared by many tickets), so it
+    # carries more weight when both step and error are present.
+    err_weight  = wf.get("error_weight", 0.65)
 
     # Hybrid parse: regex for labeled input, LLM fallback for free-form prose
     step, error = parse_input(query, cfg)
@@ -85,8 +88,8 @@ def find_workarounds(query: str, cfg: dict) -> dict:
 
     # Tickets and docs are both matched on the same (step, error) dual basis, so a
     # doc only ranks high when its failed step / error match — not on shared prose.
-    ticket_hits = vectordb.search_dual(step_emb, error_emb, top_k, index_path)
-    doc_hits    = vectordb.search_docs_dual(step_emb, error_emb, max(2, top_k // 2), index_path)
+    ticket_hits = vectordb.search_dual(step_emb, error_emb, top_k, index_path, err_weight)
+    doc_hits    = vectordb.search_docs_dual(step_emb, error_emb, max(2, top_k // 2), index_path, err_weight)
 
     # Build a single cosine-sorted candidate list (dedup tickets, drop weak docs).
     candidates   = []
@@ -165,8 +168,10 @@ def find_workarounds(query: str, cfg: dict) -> dict:
     strong  = [c for c in candidates if c["score"] >= threshold]
     context = [c for c in candidates if c["score"] <  threshold]
 
-    all_hits   = ticket_hits + doc_hits
-    best_score = all_hits[0]["score"] if all_hits else 0.0
+    # Best score reflects the ACTUAL candidates shown — not the raw hits — so a
+    # dropped pointer/duplicate (e.g. an 82% "refer to SAC-x" whose target isn't
+    # indexed) doesn't leave a misleading "best: 82%" badge on the result.
+    best_score = max((c["score"] for c in candidates), default=0.0)
     return {
         "strong":     strong,
         "context":    context,
