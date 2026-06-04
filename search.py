@@ -70,8 +70,11 @@ def find_workarounds(query: str, cfg: dict) -> dict:
     top_k       = wf.get("top_k", 10)
     threshold   = wf.get("score_threshold", DEFAULT_THRESHOLD)
     # Error is the differentiator (the step name is shared by many tickets), so it
-    # carries more weight when both step and error are present.
+    # carries more weight when both step and error are present — and a candidate
+    # whose error is below err_floor is dropped: a wrong error is a different
+    # failure, not a weak match (step-only matches must not surface).
     err_weight  = wf.get("error_weight", 0.65)
+    err_floor   = wf.get("error_floor", 0.55)
 
     # Hybrid parse: regex for labeled input, LLM fallback for free-form prose
     step, error = parse_input(query, cfg)
@@ -88,8 +91,8 @@ def find_workarounds(query: str, cfg: dict) -> dict:
 
     # Tickets and docs are both matched on the same (step, error) dual basis, so a
     # doc only ranks high when its failed step / error match — not on shared prose.
-    ticket_hits = vectordb.search_dual(step_emb, error_emb, top_k, index_path, err_weight)
-    doc_hits    = vectordb.search_docs_dual(step_emb, error_emb, max(2, top_k // 2), index_path, err_weight)
+    ticket_hits = vectordb.search_dual(step_emb, error_emb, top_k, index_path, err_weight, err_floor)
+    doc_hits    = vectordb.search_docs_dual(step_emb, error_emb, max(2, top_k // 2), index_path, err_weight, err_floor)
 
     # Build a single cosine-sorted candidate list (dedup tickets, drop weak docs).
     candidates   = []

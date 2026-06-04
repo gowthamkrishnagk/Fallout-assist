@@ -247,11 +247,16 @@ async def ask(body: dict):
     threshold  = result["threshold"]
     best_score = result["best_score"]
 
-    # No data in KB at all
+    # Nothing matched. Either the KB is empty, or no ticket matches this error
+    # (a step-only match with a different error is dropped, not shown as a lead).
     if not strong and not context:
-        return {"ok": True,
-                "mode": "no_data",
-                "answer": "No similar tickets found. Please ingest tickets first.",
+        empty  = ing.get_status(cfg).get("total_chunks", 0) == 0
+        answer = ("No tickets are indexed yet — ingest first."
+                  if empty else
+                  "No past resolution matches this failure. No ticket has this "
+                  "error, so there's no workaround to suggest (a different error on "
+                  "the same step is treated as a different problem).")
+        return {"ok": True, "mode": "no_data", "answer": answer,
                 "strong": [], "context": [], "best_score": 0}
 
     wf         = cfg["workaround_finder"]

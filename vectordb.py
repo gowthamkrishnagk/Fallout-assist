@@ -129,13 +129,13 @@ def delete_docs_by_source(source_id: str, index_path: str) -> int:
 # ── Search ─────────────────────────────────────────────────────────────────────
 
 def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k,
-                 index_path, error_weight=0.65):
+                 index_path, error_weight=0.65, error_floor=0.0):
     """Search a step + error collection pair with dynamic weighting:
-      - both embeddings present → error_weight on error, (1-error_weight) on step.
-        Error is weighted higher by default because the step name is shared by many
-        tickets, so the error is the real differentiator: a perfect step + wrong
-        error should NOT score as a near-match.
-      - only one side present   → 100% that side
+      - both embeddings present → error_weight on error, (1-error_weight) on step,
+        BUT a candidate whose error similarity is below error_floor is dropped
+        entirely. The error identifies the failure: a perfect step with a wrong
+        error is a different problem, not a weak match, so it should not surface.
+      - only one side present   → 100% that side (floor not applied)
     Either embedding may be None. Returns [] if both are None or both empty."""
     if step_emb is None and error_emb is None:
         return []
@@ -192,6 +192,8 @@ def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k,
         s = step_scores.get(id_, 0.0)
         e = error_scores.get(id_, 0.0)
         if use_step and use_error:
+            if e < error_floor:
+                continue                  # error doesn't match → not the same failure
             score = s * (1 - error_weight) + e * error_weight
         elif use_step:
             score = s                     # step-only → 100% step
@@ -207,15 +209,17 @@ def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k,
     ]
 
 
-def search_dual(step_emb, error_emb, top_k, index_path, error_weight=0.65):
-    return _search_dual(*TICKET_COLS, step_emb, error_emb, top_k, index_path, error_weight)
+def search_dual(step_emb, error_emb, top_k, index_path, error_weight=0.65, error_floor=0.0):
+    return _search_dual(*TICKET_COLS, step_emb, error_emb, top_k, index_path,
+                        error_weight, error_floor)
 
 
-def search_docs_dual(step_emb, error_emb, top_k, index_path, error_weight=0.65):
+def search_docs_dual(step_emb, error_emb, top_k, index_path, error_weight=0.65, error_floor=0.0):
     """Match documents on step + error — the same basis as tickets — so a doc
     only ranks high when its failed step and error are semantically close to the
     query, not when it merely shares boilerplate prose."""
-    return _search_dual(*DOC_COLS, step_emb, error_emb, top_k, index_path, error_weight)
+    return _search_dual(*DOC_COLS, step_emb, error_emb, top_k, index_path,
+                        error_weight, error_floor)
 
 
 # ── Misc ───────────────────────────────────────────────────────────────────────
