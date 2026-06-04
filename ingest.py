@@ -19,7 +19,7 @@ load_dotenv()
 
 import embedder
 import vectordb
-from textclean import clean_text
+from textclean import clean_text, is_pointer_comment
 
 _STATE_FILE  = Path(__file__).parent / "trackers" / "ingest_state.json"
 _ingest_lock = threading.Lock()
@@ -192,11 +192,14 @@ def _get_assignee_comments(issue) -> list[dict]:
             return True
         return False
 
-    # All substantive human comments (bots excluded)
+    # All substantive human comments (bots excluded). Pointer comments
+    # ("duplicate, refer to SAC-x") are dropped — they describe no fix.
     human = [
         {"author": c.author.displayName, "body": _clean(c.body), "is_assignee": _is_assignee(c)}
         for c in comments
-        if c.body and len(c.body.strip()) > 40 and not _is_bot(c.author.displayName)
+        if c.body and len(c.body.strip()) > 40
+        and not _is_bot(c.author.displayName)
+        and not is_pointer_comment(c.body)
     ]
 
     assignee_only = [c for c in human if c["is_assignee"]]

@@ -86,19 +86,15 @@ def _generate_one(prompt: str, provider: str, model: str, cfg: dict) -> dict:
 
 
 def _resolve_job(cfg: dict, job: str):
-    """Per-job provider/model override so different jobs spread across free
+    """Per-job provider/model override so different jobs can spread across free
     providers (Groq / Cerebras / NVIDIA) instead of draining one quota.
 
-    Priority: explicit cfg["jobs"][job] → built-in preference → global default.
-    Built-in: synthesis (the quality-critical step) prefers Cerebras gpt-oss-120b
-    when a Cerebras key is present, so the answer uses the strongest free model
-    without forcing it on users who don't have that key (then it stays on global).
-    Returns (provider_or_None, model_or_None)."""
+    Only an EXPLICIT cfg["jobs"][job] override applies — there is no built-in
+    preference, so every job uses the user's selected provider by default (the
+    user's choice is always respected). Returns (provider_or_None, model_or_None)."""
     jobs = cfg.get("jobs") or {}
     if job in jobs:
         return jobs[job].get("provider"), jobs[job].get("model")
-    if job == "synthesis" and os.getenv("CEREBRAS_API_KEY", "").strip():
-        return "cerebras", "gpt-oss-120b"
     return None, None
 
 
@@ -120,7 +116,9 @@ def generate(prompt: str, cfg: dict, job: str | None = None) -> dict:
     job_prov, job_model = _resolve_job(cfg, job) if job else (None, None)
     primary  = job_prov or cfg.get("provider", "local")
     fallback = cfg.get("fallback", []) or []
-    order    = [primary] + [p for p in fallback if p != primary]
+    # Never auto-fall to the local model: a weak local model ignores grounding and
+    # hallucinates. `local` is used ONLY when it is the explicitly selected primary.
+    order    = [primary] + [p for p in fallback if p != primary and p != "local"]
 
     errors = []
     for i, prov in enumerate(order):

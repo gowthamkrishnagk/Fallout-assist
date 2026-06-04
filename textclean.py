@@ -37,3 +37,40 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s*-\s*', ' ', text)      # hyphen separators -> space
     text = re.sub(r'\s+', ' ', text)
     return text.strip(' -|:•‣●')   # trim stray bullets/seps
+
+
+# Comments that merely point at another ticket ("duplicate, please refer to
+# SAC-231619") are not workarounds — they must be followed to the real fix or
+# dropped, never shown as a resolution.
+_POINTER_RE = re.compile(
+    r'duplicat\w*'
+    r'|please\s+refer\s+to'
+    r'|refer\s+to\s+(?:the\s+)?(?:ticket|jira|sac)'
+    r'|merged\s+(?:with|into)'
+    r'|tracked\s+(?:in|under)'
+    r'|raised\s+as\s+(?:a\s+)?duplicate',
+    re.IGNORECASE,
+)
+_TICKET_REF_RE = re.compile(r'browse/([A-Za-z]+-\d+)|\b([A-Z]{2,}-\d{3,})\b')
+
+
+def is_pointer_comment(body: str) -> bool:
+    """True when a comment just points to another ticket instead of describing a
+    fix (e.g. 'duplicated ticket please refer to SAC-231619'). Requires both a
+    pointer phrase AND a ticket reference, to avoid flagging a real fix that merely
+    mentions a ticket in passing."""
+    if not body:
+        return False
+    has_ref = bool(re.search(r'browse/[A-Za-z]+-\d+|smart-?link|\b[A-Z]{2,}-\d{3,}\b', body))
+    return bool(_POINTER_RE.search(body)) and has_ref
+
+
+def referenced_ticket(body: str) -> str:
+    """Extract the referenced ticket key from a pointer comment ('...SAC-231619'),
+    uppercased, or '' if none found."""
+    if not body:
+        return ""
+    m = _TICKET_REF_RE.search(body)
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").upper()

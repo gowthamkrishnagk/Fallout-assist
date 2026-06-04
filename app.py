@@ -254,30 +254,41 @@ async def ask(body: dict):
                 "answer": "No similar tickets found. Please ingest tickets first.",
                 "strong": [], "context": [], "best_score": 0}
 
-    synthesize = cfg["workaround_finder"].get("llm_synthesize", True)
+    wf         = cfg["workaround_finder"]
+    llm_on     = wf.get("llm_enabled", True)            # master LLM switch
+    synthesize = llm_on and wf.get("llm_synthesize", True)
+    llm_note   = ""
 
     # Strong match(es) found — produce a grounded `=== FIX ===` recommendation.
     if strong:
         top_body = strong[0]["comment"]
-        # Hybrid: if the best source is ALREADY a clean === FIX === block, show it
-        # verbatim — no point re-mangling a correct human fix through the LLM.
-        if "=== fix ===" in top_body.lower() or not synthesize:
+        # Hybrid: if the LLM is disabled, or the best source is ALREADY a clean
+        # === FIX === block, show it verbatim — no generation.
+        if not synthesize or "=== fix ===" in top_body.lower():
             answer, provider, model = top_body, "direct_match", ""
         else:
             # Legacy / multiple comments → LLM synthesizes into the FIX format,
             # grounded in sources only. On decline (NO_RELIABLE_WORKAROUND), empty
-            # output, or any error → fall back to the raw best comment, never invent.
+            # output, a local-model answer, or any error → fall back to the raw
+            # best comment, never invent.
             try:
                 prompt = s.build_prompt(query_text, result)
                 gen    = g.generate(prompt, cfg["llm"], job="synthesis")
                 ans    = (gen.get("answer") or "").strip()
-                if s.NO_FIX_SENTINEL in ans or len(ans) < 10:
+                if gen.get("provider") == "local":
+                    print("[LLM] synthesis answered by local model — distrust, verbatim")
+                    answer, provider, model = top_body, "direct_match", ""
+                elif s.NO_FIX_SENTINEL in ans or len(ans) < 10:
                     print("[LLM] declined / empty — showing raw best comment")
                     answer, provider, model = top_body, "direct_match", ""
                 else:
                     answer, provider, model = ans, gen["provider"], gen["model"]
             except Exception as llm_err:
-                print(f"[LLM] synthesis failed, verbatim fallback — {llm_err}")
+                # All cloud providers failed — show the raw comment and tell the
+                # user why, instead of silently dropping to a local model.
+                reason   = str(llm_err)[:160]
+                llm_note = f"LLM unavailable, showing the raw matched comment: {reason}"
+                print(f"[LLM] synthesis failed, verbatim fallback — {reason}")
                 answer, provider, model = top_body, "direct_match", ""
         mode = "strong_match"
 
@@ -297,6 +308,7 @@ async def ask(body: dict):
         "answer":    answer,
         "provider":  provider,
         "model":     model,
+        "llm_note":  llm_note,      # set when cloud LLM failed (verbatim fallback)
         "threshold": threshold,
         "best_score": best_score,
         "strong":    strong,        # comments scoring >= threshold
@@ -371,9 +383,21 @@ def llm_providers():
         # Which providers already have a key saved in .env → drives the masked
         # "Key saved" UI state per provider.
         "has_keys":  {p: bool(os.getenv(_key_env(p), "").strip()) for p in PROVIDERS},
+        "enabled":   cfg["workaround_finder"].get("llm_enabled", True),
         "rerank":    cfg["workaround_finder"].get("llm_rerank", False),
         "synthesize": cfg["workaround_finder"].get("llm_synthesize", True),
     }
+
+
+@app.post("/api/llm/enabled")
+def llm_set_enabled(body: dict):
+    """Master switch for ALL LLM use (synthesis, re-rank, parse). When off, the
+    tool does pure retrieval and shows matched comments verbatim — no LLM calls,
+    cloud or local. Persisted to config.json."""
+    cfg = load_config()
+    cfg["workaround_finder"]["llm_enabled"] = bool(body.get("enabled", True))
+    save_config(cfg)
+    return {"ok": True, "enabled": cfg["workaround_finder"]["llm_enabled"]}
 
 
 @app.post("/api/llm/rerank")

@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 import embedder
 import vectordb
-from textclean import clean_text
+from textclean import clean_text, is_pointer_comment, referenced_ticket
 
 DEFAULT_THRESHOLD = 0.70   # cosine-similarity scale; live value from config.json (score_threshold)
 
@@ -100,6 +100,22 @@ def find_workarounds(query: str, cfg: dict) -> dict:
             key = meta.get("key")
             if key in seen_tickets:
                 continue
+            comment = meta.get("comment_body", h["doc"])
+
+            # A pointer comment ("duplicate, refer to SAC-231619") is not a fix.
+            # Follow the reference to that ticket's real resolution; drop the
+            # candidate if the referenced ticket isn't indexed (or is also a pointer).
+            if is_pointer_comment(comment):
+                ref      = referenced_ticket(comment)
+                ref_meta = vectordb.get_ticket_meta(ref, index_path) if ref else {}
+                ref_body = ref_meta.get("comment_body", "")
+                if not ref_body or is_pointer_comment(ref_body):
+                    continue
+                ref_key = ref_meta.get("key", ref)
+                if ref_key in seen_tickets:
+                    continue
+                key, meta, comment = ref_key, ref_meta, ref_body
+
             seen_tickets.add(key)
             candidates.append({
                 "type":        "ticket",
@@ -108,7 +124,7 @@ def find_workarounds(query: str, cfg: dict) -> dict:
                 "url":         meta.get("url", ""),
                 "assignee":    meta.get("assignee", ""),
                 "author":      meta.get("comment_author", ""),
-                "comment":     meta.get("comment_body", h["doc"]),
+                "comment":     comment,
                 "description": meta.get("description", ""),
                 "error":       meta.get("error", ""),
                 "step":        meta.get("step", ""),
@@ -172,8 +188,12 @@ def _llm_rerank(step: str, error: str, candidates: list, cfg: dict) -> list:
     Only step/error/summary are sent — never full comment bodies — so the call
     stays cheap."""
     # Nothing to disambiguate with 0 or 1 candidate — skip the LLM call entirely
-    # (saves a request against the daily quota; the result can't change).
-    if len(candidates) <= 1 or not cfg["workaround_finder"].get("llm_rerank", False):
+    # (saves a request against the daily quota; the result can't change). Also
+    # skipped when the master LLM switch is off or re-rank is disabled.
+    wf = cfg["workaround_finder"]
+    if (len(candidates) <= 1
+            or not wf.get("llm_enabled", True)
+            or not wf.get("llm_rerank", False)):
         return candidates
 
     import generate as g
@@ -247,6 +267,10 @@ def parse_input(raw: str, cfg: dict) -> tuple[str, str]:
        configured provider. On any LLM failure → ('', '') so the caller searches raw text."""
     step, error, _ = _extract_fields(raw)
     if step or error:
+        return step, error
+    # Free-form prose with nothing extractable: only call the LLM parser if the
+    # master LLM switch is on; otherwise search the raw text.
+    if not cfg["workaround_finder"].get("llm_enabled", True):
         return step, error
     return _llm_parse(raw, cfg)
 

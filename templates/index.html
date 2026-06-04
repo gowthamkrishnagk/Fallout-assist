@@ -171,12 +171,36 @@
 
         <div class="rerank-row">
           <label class="switch">
-            <input type="checkbox" id="llm-rerank-toggle" onchange="saveRerank(this.checked)">
+            <input type="checkbox" id="llm-enabled-toggle" onchange="saveLLMEnabled(this.checked)">
             <span class="slider"></span>
           </label>
           <div>
-            <div class="rerank-title">LLM relevance re-rank</div>
-            <div class="key-hint">Uses the model to filter out near-miss matches. Skipped when there's nothing to disambiguate; falls back to similarity ranking if the model is unavailable.</div>
+            <div class="rerank-title">Use LLM</div>
+            <div class="key-hint">Master switch. When OFF, the tool does pure retrieval and shows the real matched resolution comments verbatim — no generation, no LLM calls (cloud or local).</div>
+          </div>
+        </div>
+
+        <div id="llm-sub-toggles">
+          <div class="rerank-row">
+            <label class="switch">
+              <input type="checkbox" id="llm-synthesize-toggle" onchange="saveSynthesize(this.checked)">
+              <span class="slider"></span>
+            </label>
+            <div>
+              <div class="rerank-title">Synthesize === FIX === answer</div>
+              <div class="key-hint">Rewrites the matched resolutions into a clean === FIX === block, grounded in the sources. When off, the best matched comment is shown verbatim.</div>
+            </div>
+          </div>
+
+          <div class="rerank-row">
+            <label class="switch">
+              <input type="checkbox" id="llm-rerank-toggle" onchange="saveRerank(this.checked)">
+              <span class="slider"></span>
+            </label>
+            <div>
+              <div class="rerank-title">LLM relevance re-rank</div>
+              <div class="key-hint">Uses the model to filter out near-miss matches. Skipped when there's nothing to disambiguate; falls back to similarity ranking if the model is unavailable.</div>
+            </div>
           </div>
         </div>
 
@@ -269,7 +293,8 @@ async function doAsk() {
 
   document.getElementById('answer-text').textContent = r.answer;
   document.getElementById('result-provider').textContent =
-    modeBadge + (r.provider && r.provider !== 'direct_match' ? `  •  ${r.provider}/${r.model}` : '');
+    modeBadge + (r.provider && r.provider !== 'direct_match' ? `  •  ${r.provider}/${r.model}` : '')
+              + (r.llm_note ? `  •  ⚠️ ${r.llm_note}` : '');
   showEl('ask-result');
 
   // Strong matched comments — show as primary sources
@@ -497,7 +522,10 @@ async function loadLLMProviders() {
   _allModels    = r.models;
   _providerHasKey = r.has_keys || {};
   _currentProvider = r.current.provider;
-  document.getElementById('llm-rerank-toggle').checked = !!r.rerank;
+  document.getElementById('llm-enabled-toggle').checked    = r.enabled !== false;
+  document.getElementById('llm-synthesize-toggle').checked = r.synthesize !== false;
+  document.getElementById('llm-rerank-toggle').checked     = !!r.rerank;
+  _applyLLMEnabledState(r.enabled !== false);
 
   const cards = document.getElementById('provider-cards');
   cards.innerHTML = Object.entries(_providers).map(([key, p]) => `
@@ -548,6 +576,24 @@ function editLLMKey() {
 
 function cancelEditLLMKey() {
   _applyLLMKeyState(true, false);
+}
+
+// Grey out + disable the sub-toggles when the master LLM switch is off.
+function _applyLLMEnabledState(on) {
+  const sub = document.getElementById('llm-sub-toggles');
+  sub.style.opacity = on ? '1' : '0.45';
+  sub.querySelectorAll('input[type=checkbox]').forEach(c => c.disabled = !on);
+}
+
+async function saveLLMEnabled(enabled) {
+  _applyLLMEnabledState(enabled);
+  const r = await post('/api/llm/enabled', { enabled });
+  if (!r.ok) alert('Could not update LLM setting');
+}
+
+async function saveSynthesize(enabled) {
+  const r = await post('/api/llm/synthesize', { enabled });
+  if (!r.ok) alert('Could not update synthesis setting');
 }
 
 async function saveRerank(enabled) {
