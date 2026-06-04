@@ -228,7 +228,18 @@ async def ask(body: dict):
         try:
             query_text = ing.fetch_ticket_text(ticket_id, cfg)
         except Exception as e:
-            raise HTTPException(400, f"Could not fetch ticket {ticket_id}: {e}")
+            # Clean, actionable message — never dump the raw JiraError (headers,
+            # request IDs, etc.) into the UI.
+            code = getattr(e, "status_code", None)
+            if code == 404:
+                msg = (f"Ticket {ticket_id} not found, or your Jira account can't see it. "
+                       f"Check the ID and that it's in a project you have access to.")
+            elif code in (401, 403):
+                msg = ("Jira authentication failed — verify JIRA_EMAIL and JIRA_API_TOKEN "
+                       "in Settings (the token may have expired).")
+            else:
+                msg = f"Could not fetch ticket {ticket_id} from Jira (HTTP {code or 'error'})."
+            raise HTTPException(400, msg)
 
     result = s.find_workarounds(query_text, cfg)
     strong  = result["strong"]

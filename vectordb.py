@@ -216,6 +216,18 @@ def search_docs_dual(step_emb, error_emb, top_k, index_path):
 
 # ── Misc ───────────────────────────────────────────────────────────────────────
 
+def get_ticket_meta(key: str, index_path: str) -> dict:
+    """Stored metadata (step/error/summary…) for a ticket key, or {} if the
+    ticket isn't indexed. Lets the ticket-ID search fall back to the index when
+    a live Jira fetch fails."""
+    try:
+        got = _get_col(index_path, "workarounds_step").get(where={"key": key})
+        metas = got.get("metadatas", [])
+        return metas[0] if metas else {}
+    except Exception:
+        return {}
+
+
 def count(index_path: str) -> int:
     try:
         return (

@@ -605,9 +605,24 @@ def preview_jql(jql: str, cfg: dict) -> dict:
 
 
 def fetch_ticket_text(ticket_id: str, cfg: dict) -> str:
-    jira  = _get_jira(cfg)
-    issue = jira.issue(ticket_id, fields="summary,description,comment,assignee")
-    return _ticket_to_text(issue)
+    index_path = str(Path(__file__).parent / cfg["workaround_finder"]["index_path"])
+    try:
+        jira  = _get_jira(cfg)
+        issue = jira.issue(ticket_id, fields="summary,description,comment,assignee")
+        return _ticket_to_text(issue)
+    except Exception:
+        # Live Jira fetch failed (not found / no permission / auth). If the ticket
+        # is already in our index, build the query from its stored step + error so
+        # the search still works without Jira.
+        meta  = vectordb.get_ticket_meta(ticket_id, index_path)
+        parts = []
+        if meta.get("step"):
+            parts.append(f"Failed Step: {meta['step']}")
+        if meta.get("error"):
+            parts.append(f"Error: {meta['error']}")
+        if parts:
+            return "\n".join(parts)
+        raise   # not indexed either → surface the original error to the caller
 
 
 # ── State helpers ─────────────────────────────────────────────────────────────
