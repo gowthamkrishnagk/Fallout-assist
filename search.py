@@ -28,6 +28,32 @@ def _clean_query(text: str) -> str:
 
 
 
+def _resolution_quality(c: dict) -> float:
+    """Cheap, LLM-FREE score of how usable a candidate's resolution is, so
+    synthesis draws from the best-resolved tickets first instead of an arbitrary
+    cosine order. Costs nothing (no network / no Groq quota).
+
+    Rewards: the structured '=== FIX ===' block, numbered/bulleted steps, and
+    substance. Penalizes one-word closers ('done', 'fixed') and very short text.
+    """
+    if c.get("type") == "doc":
+        return 3.0   # uploaded docs are curated workarounds — treat as solid
+    body = (c.get("comment") or "").strip()
+    if not body:
+        return 0.0
+    score = 0.0
+    if "=== fix ===" in body.lower():
+        score += 5.0                                   # follows the resolution format
+    steps = len(re.findall(r'(?m)^\s*(?:\d+[.)]|[-*•])\s+\S', body))
+    score += min(steps, 5) * 0.6                        # actionable, ordered steps
+    score += min(len(body) / 200.0, 3.0)                # substance (capped)
+    if re.fullmatch(r'(?i)\s*(done|fixed|closing|closed|resolved|n/?a|ok)[.!]?\s*', body):
+        score -= 5.0                                    # non-resolution closer
+    if len(body) < 60:
+        score -= 1.0
+    return score
+
+
 def find_workarounds(query: str, cfg: dict) -> dict:
     """
     Returns:
@@ -108,13 +134,17 @@ def find_workarounds(query: str, cfg: dict) -> dict:
     # or the LLM is unavailable.
     candidates = _llm_rerank(step, error, candidates, cfg)
 
-    # Recency weighting: among matches of similar strength (same 0.01 score
-    # bucket — e.g. the many tickets that tie at 1.0 for an identical error),
-    # prefer the most recently-updated ticket. Newer resolutions reflect the
-    # current system/process. A clearly better match (bigger score) still wins;
-    # docs carry no date (updated_ts=0) so they fall after tied tickets.
-    candidates.sort(key=lambda c: (round(c["score"], 2), c.get("updated_ts", 0)),
-                    reverse=True)
+    # Order matches of similar strength (same 0.01 score bucket — e.g. the many
+    # tickets that tie at 1.0 for an identical error) by, in priority:
+    #   1. cosine match strength  (a clearly better match still wins)
+    #   2. resolution quality      (best-resolved ticket feeds the answer/synthesis)
+    #   3. recency                 (newest among equally-good resolutions)
+    # All LLM-free, so it costs no Groq/OpenAI quota.
+    candidates.sort(
+        key=lambda c: (round(c["score"], 2),
+                       round(_resolution_quality(c)),
+                       c.get("updated_ts", 0)),
+        reverse=True)
 
     strong  = [c for c in candidates if c["score"] >= threshold]
     context = [c for c in candidates if c["score"] <  threshold]
