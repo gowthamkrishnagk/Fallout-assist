@@ -104,29 +104,44 @@ def find_workarounds(query: str, cfg: dict) -> dict:
             if key in seen_tickets:
                 continue
             comment = meta.get("comment_body", h["doc"])
+            url     = meta.get("url", "")
+            author  = meta.get("comment_author", "")
 
             # A pointer comment ("duplicate, refer to SAC-231619") is not a fix.
-            # Follow the reference to that ticket's real resolution; drop the
-            # candidate if the referenced ticket isn't indexed (or is also a pointer).
+            # Resolve it to the referenced ticket's real resolution — from the index
+            # first, else a live Jira fetch. Drop the candidate if neither yields a
+            # usable fix (referenced ticket missing / still open / also a pointer).
             if is_pointer_comment(comment):
-                ref      = referenced_ticket(comment)
-                ref_meta = vectordb.get_ticket_meta(ref, index_path) if ref else {}
+                ref = referenced_ticket(comment)
+                if not ref or ref in seen_tickets:
+                    continue
+                ref_meta = vectordb.get_ticket_meta(ref, index_path)
                 ref_body = ref_meta.get("comment_body", "")
-                if not ref_body or is_pointer_comment(ref_body):
+                if ref_body and not is_pointer_comment(ref_body):
+                    # Referenced ticket is indexed — use its stored resolution.
+                    key, comment = ref_meta.get("key", ref), ref_body
+                    url, author  = ref_meta.get("url", ""), ref_meta.get("comment_author", "")
+                    meta         = ref_meta
+                else:
+                    # Not indexed → follow to Jira live for the real resolution.
+                    import ingest as ing
+                    fetched = ing.fetch_ticket_resolution(ref, cfg)
+                    if not fetched:
+                        continue
+                    key, comment = fetched["key"], fetched["comment"]
+                    url, author  = fetched["url"], fetched.get("author", "")
+                    # keep meta (the duplicate's step/error/summary — same failure)
+                if key in seen_tickets:
                     continue
-                ref_key = ref_meta.get("key", ref)
-                if ref_key in seen_tickets:
-                    continue
-                key, meta, comment = ref_key, ref_meta, ref_body
 
             seen_tickets.add(key)
             candidates.append({
                 "type":        "ticket",
                 "key":         key,
                 "summary":     meta.get("summary", ""),
-                "url":         meta.get("url", ""),
+                "url":         url,
                 "assignee":    meta.get("assignee", ""),
-                "author":      meta.get("comment_author", ""),
+                "author":      author,
                 "comment":     comment,
                 "description": meta.get("description", ""),
                 "error":       meta.get("error", ""),

@@ -607,6 +607,39 @@ def preview_jql(jql: str, cfg: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# Small in-process cache for live duplicate-follow fetches — resolutions rarely
+# change, and the same referenced ticket can be hit across queries.
+_resolution_cache: dict = {}
+
+
+def fetch_ticket_resolution(ticket_id: str, cfg: dict) -> dict:
+    """Live-fetch a ticket from Jira and return its best resolution comment, to
+    follow a 'duplicate, refer to SAC-x' pointer to the real fix when SAC-x isn't
+    indexed. Bots and pointer comments are already excluded by
+    _get_assignee_comments. Returns {key, url, comment, author} or {} if the ticket
+    can't be fetched, has no usable resolution, or is itself a pointer."""
+    if ticket_id in _resolution_cache:
+        return _resolution_cache[ticket_id]
+    try:
+        jira     = _get_jira(cfg)
+        issue    = jira.issue(ticket_id, fields="summary,comment,assignee")
+        comments = _get_assignee_comments(issue)
+        if not comments:
+            return {}
+        c      = comments[-1]   # most recent substantive (non-bot, non-pointer) comment
+        result = {
+            "key":     issue.key,
+            "url":     f"{jira.server_url}/browse/{issue.key}",
+            "comment": c["body"],
+            "author":  c["author"],
+        }
+        _resolution_cache[ticket_id] = result
+        return result
+    except Exception as e:
+        print(f"[DUP-FOLLOW] could not fetch {ticket_id}: {str(e)[:100]}")
+        return {}
+
+
 def fetch_ticket_text(ticket_id: str, cfg: dict) -> str:
     index_path = str(Path(__file__).parent / cfg["workaround_finder"]["index_path"])
     try:
