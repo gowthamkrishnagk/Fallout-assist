@@ -202,8 +202,17 @@ def _get_assignee_comments(issue) -> list[dict]:
     return assignee_only if assignee_only else human[-3:]
 
 
-def ingest_jira(cfg: dict, progress_cb=None) -> dict:
-    """Pull tickets, create one chunk per assignee comment. Returns {ok, indexed, skipped, error}."""
+def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
+    """Pull tickets and index them INCREMENTALLY.
+
+    Only NEW or CHANGED tickets are re-embedded: a ticket whose Jira `updated`
+    timestamp matches what we stored on the last run is skipped entirely — no
+    re-embedding, no DB writes. Tickets that have fallen out of the JQL since the
+    last run (e.g. reopened) are pruned from the index. Pass full=True to force a
+    complete rebuild (e.g. after changing the embedding model or the format).
+
+    Returns {ok, indexed, skipped, up_to_date, pruned, tickets_indexed, error}.
+    """
     with _ingest_lock:
         wf          = cfg["workaround_finder"]
         jql         = wf["ingest_jql"] + " ORDER BY updated DESC"
@@ -213,25 +222,63 @@ def ingest_jira(cfg: dict, progress_cb=None) -> dict:
         try:
             jira   = _get_jira(cfg)
             issues = _search_jql(jira, jql,
-                                 "summary,description,status,comment,resolution,assignee")
+                                 "summary,description,status,comment,resolution,assignee,updated")
             total  = len(issues)
             if progress_cb:
                 progress_cb(f"Fetched {total} tickets from Jira")
 
+            # Per-ticket sync state: {jira_key: last-seen `updated` timestamp}.
+            # full=True ignores it so everything is rebuilt from scratch.
+            state        = _load_state()
+            known        = {} if full else dict(state.get("tickets", {}))
+            fetched_keys = {issue.key for issue in issues}
+
+            # Prune tickets we indexed before but that no longer match the JQL.
+            pruned = 0
+            for key in [k for k in known if k not in fetched_keys]:
+                vectordb.delete_ticket_by_source(key, index_path)
+                known.pop(key, None)
+                pruned += 1
+
+            # Keep only new / changed tickets — skip ones unchanged since last run.
+            changed    = []
+            up_to_date = 0
+            for issue in issues:
+                updated = str(getattr(issue.fields, "updated", "") or "")
+                if not full and known.get(issue.key) == updated:
+                    up_to_date += 1
+                    continue
+                changed.append((issue, updated))
+
+            if progress_cb:
+                progress_cb(f"{len(changed)} new/changed, {up_to_date} unchanged, "
+                            f"{pruned} pruned")
+
+            # Upsert: clear any existing chunks for changed tickets before re-adding
+            # (no-op for brand-new tickets) so we never duplicate.
+            for issue, _ in changed:
+                vectordb.delete_ticket_by_source(issue.key, index_path)
+
             ids = []; step_texts = []; error_texts = []; display_texts = []; metas = []
             skipped = 0
+            reindexed = 0
 
-            for i, issue in enumerate(issues):
+            for i, (issue, updated) in enumerate(changed):
                 assignee      = getattr(issue.fields, "assignee", None)
                 assignee_name = getattr(assignee, "displayName", "") or ""
                 summary       = issue.fields.summary
                 url           = f"{jira.server_url}/browse/{issue.key}"
                 comments      = _get_assignee_comments(issue)
 
+                # Record the timestamp regardless, so a ticket without a usable
+                # resolution comment isn't re-fetched and re-skipped every run.
+                known[issue.key] = updated
+
                 if not comments:
                     skipped += 1
                     continue
 
+                reindexed += 1
                 error_ctx   = _extract_error_context(issue)
                 clean_sum   = _clean_for_embed(summary)
                 desc_fields = _extract_description_fields(issue)
@@ -286,28 +333,32 @@ def ingest_jira(cfg: dict, progress_cb=None) -> dict:
                     })
 
                 if progress_cb and i % 20 == 0:
-                    progress_cb(f"Processing ticket {i+1}/{total}")
+                    progress_cb(f"Processing ticket {i+1}/{len(changed)}")
 
-            if not ids:
-                return {"ok": False, "error": "No comments found to index"}
+            # Embed and store only the new/changed chunks (the unchanged tickets'
+            # chunks are already in the index, untouched). No new chunks → the run
+            # was a no-op refresh, which is a normal success, not an error.
+            if ids:
+                if progress_cb:
+                    progress_cb(f"Embedding {len(ids)} chunks — step + error separately...")
+                step_embs  = embedder.embed(step_texts, embed_model)
+                # Embed only non-None error texts; keep None positions as None
+                error_texts_clean = [t if t else "" for t in error_texts]
+                error_embs_all    = embedder.embed(error_texts_clean, embed_model)
+                error_embs = [emb if error_texts[k] else None
+                              for k, emb in enumerate(error_embs_all)]
 
-            if progress_cb:
-                progress_cb(f"Embedding {len(ids)} chunks — step + error separately...")
+                if progress_cb:
+                    progress_cb("Storing fresh ticket chunks...")
+                vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
 
-            step_embs  = embedder.embed(step_texts, embed_model)
-            # Embed only non-None error texts; keep None positions as None
-            error_texts_clean = [t if t else "" for t in error_texts]
-            error_embs_all    = embedder.embed(error_texts_clean, embed_model)
-            error_embs = [emb if error_texts[i] else None
-                          for i, emb in enumerate(error_embs_all)]
-
-            if progress_cb:
-                progress_cb("Clearing old ticket chunks and storing fresh ones...")
-            vectordb.delete_tickets(index_path)
-            vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
             _save_state({"last_jira_sync": datetime.utcnow().isoformat(),
-                         "jira_count": len(ids), "ticket_count": total})
-            return {"ok": True, "indexed": len(ids), "skipped": skipped}
+                         "tickets":      known,
+                         "jira_count":   len(known),
+                         "ticket_count": total})
+            return {"ok": True, "indexed": len(ids), "skipped": skipped,
+                    "up_to_date": up_to_date, "pruned": pruned,
+                    "tickets_indexed": reindexed}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

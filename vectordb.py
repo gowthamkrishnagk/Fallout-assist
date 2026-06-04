@@ -85,6 +85,12 @@ def delete_tickets(index_path: str) -> int:
     return total
 
 
+def delete_ticket_by_source(source_id: str, index_path: str) -> int:
+    """Delete one ticket's chunks (by its Jira key) from both ticket collections —
+    used for incremental upsert: clear a changed ticket before re-adding it."""
+    return _delete_by_source(TICKET_COLS, source_id, index_path)
+
+
 def delete_docs_by_source(source_id: str, index_path: str) -> int:
     return _delete_by_source(DOC_COLS, source_id, index_path)
 

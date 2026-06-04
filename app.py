@@ -86,17 +86,22 @@ def ingest_start(body: dict):
     import ingest as ing
     if not _try_acquire():
         return JSONResponse({"ok": False, "status": "already_running"}, status_code=409)
-    cfg = load_config()
-    jql = body.get("jql", "").strip()
+    cfg  = load_config()
+    jql  = body.get("jql", "").strip()
+    full = bool(body.get("full", False))   # force a complete rebuild
     if jql:
         cfg["workaround_finder"]["ingest_jql"] = jql
         save_config(cfg)
 
     def _run():
         try:
-            result = ing.ingest_jira(cfg)
+            result = ing.ingest_jira(cfg, full=full)
             if result.get("ok"):
-                print(f"[INGEST] Done — indexed {result['indexed']} tickets, skipped {result['skipped']}")
+                print(f"[INGEST] Done — indexed {result['indexed']} chunks "
+                      f"({result.get('tickets_indexed', 0)} tickets), "
+                      f"skipped {result['skipped']}, "
+                      f"up-to-date {result.get('up_to_date', 0)}, "
+                      f"pruned {result.get('pruned', 0)}")
             else:
                 print(f"[INGEST] FAILED: {result.get('error')}")
         except Exception as e:
