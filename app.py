@@ -139,14 +139,20 @@ def ingest_start(body: dict):
         return JSONResponse({"ok": False, "status": "already_running"}, status_code=409)
     cfg  = load_config()
     jql  = body.get("jql", "").strip()
-    full = bool(body.get("full", False))   # force a complete rebuild
+    # mode: "rebuild" → delete & full re-ingest | "refresh" → latest only
+    # (windowed incremental) | "" → incremental full-scope sync.
+    mode = body.get("mode", "")
+    full = bool(body.get("full", False)) or mode == "rebuild"
+    since_minutes = None
+    if mode == "refresh" and not full:
+        since_minutes = int(cfg["workaround_finder"].get("auto_ingest_lookback_minutes", 1440) or 1440)
     if jql:
         cfg["workaround_finder"]["ingest_jql"] = jql
         save_config(cfg)
 
     def _run():
         try:
-            result = ing.ingest_jira(cfg, full=full)
+            result = ing.ingest_jira(cfg, full=full, since_minutes=since_minutes)
             if result.get("ok"):
                 print(f"[INGEST] Done — indexed {result['indexed']} chunks "
                       f"({result.get('tickets_indexed', 0)} tickets), "

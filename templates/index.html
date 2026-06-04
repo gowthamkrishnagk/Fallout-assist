@@ -76,8 +76,22 @@
 
     <div class="ingest-actions">
       <button class="btn-secondary" onclick="previewJQL()">👁 Preview count</button>
-      <button id="ingest-btn" class="btn-primary" onclick="startIngest()">▶ Start Ingest</button>
+      <button id="btn-refresh" class="btn-primary" onclick="startIngest('refresh')"
+              title="Fetch only tickets updated recently and add the new/changed ones">🔄 Refresh (latest)</button>
+      <button id="btn-rebuild" class="btn-secondary" onclick="startIngest('rebuild')"
+              title="Delete all indexed tickets and rebuild from scratch">♻ Re-ingest (rebuild)</button>
       <span id="ingest-spinner" class="spinner hidden"></span>
+    </div>
+
+    <div class="ingest-actions" style="margin-top:8px;align-items:center;gap:8px">
+      <label class="field-label" style="margin:0">⏱ Auto-refresh</label>
+      <select id="sched-select" onchange="setSchedule()">
+        <option value="0">Off</option>
+        <option value="10">Every 10 min</option>
+        <option value="60">Hourly</option>
+        <option value="1440">Daily</option>
+      </select>
+      <span id="sched-status" class="subtitle" style="margin:0"></span>
     </div>
 
     <div id="preview-result" class="preview-box hidden"></div>
@@ -221,7 +235,7 @@ function showTab(name) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`tab-${name}`).classList.remove('hidden');
   event.currentTarget.classList.add('active');
-  if (name === 'ingest')  loadIngestStatus();
+  if (name === 'ingest') { loadIngestStatus(); loadSchedule(); }
   if (name === 'docs')    loadDocs();
   if (name === 'llm')   { loadLLMProviders(); loadLLMQuota(); }
   if (name === 'settings') loadConfig();
@@ -330,20 +344,26 @@ async function loadIngestStatus() {
   document.getElementById('st-sync').textContent    = r.last_jira_sync ? new Date(r.last_jira_sync).toLocaleString() : 'Never';
   document.getElementById('kb-status').textContent  = `KB: ${r.total_chunks ?? 0} chunks`;
 
-  const btn = document.getElementById('ingest-btn');
-  const spinner = document.getElementById('ingest-spinner');
-  if (r.running) {
-    btn.disabled = true;
-    btn.textContent = '⏳ Ingesting…';
-    spinner.classList.remove('hidden');
-    document.getElementById('run-status').textContent = '🔄 Ingesting...';
-    setTimeout(loadIngestStatus, 3000);
-  } else {
-    btn.disabled = false;
-    btn.textContent = '▶ Start Ingest';
-    spinner.classList.add('hidden');
-    document.getElementById('run-status').textContent = '';
-  }
+  const busy = !!r.running;
+  document.querySelectorAll('#tab-ingest .ingest-actions button').forEach(b => b.disabled = busy);
+  document.getElementById('ingest-spinner').classList.toggle('hidden', !busy);
+  document.getElementById('run-status').textContent = busy ? '🔄 Ingesting...' : '';
+  if (busy) setTimeout(loadIngestStatus, 3000);
+}
+
+async function loadSchedule() {
+  const r = await get('/api/ingest/schedule');
+  if (!r.ok) return;
+  document.getElementById('sched-select').value = String(r.minutes);
+  document.getElementById('sched-status').textContent = r.minutes > 0
+    ? `on — every ${r.minutes} min (looks back ${r.lookback_minutes} min)`
+    : 'off';
+}
+
+async function setSchedule() {
+  const minutes = parseInt(document.getElementById('sched-select').value, 10);
+  const r = await post('/api/ingest/schedule', { minutes });
+  if (r.ok) loadSchedule();
 }
 
 async function loadIngestJQL() {
@@ -365,23 +385,24 @@ async function previewJQL() {
   }
 }
 
-async function startIngest() {
+async function startIngest(mode) {
   const jql = document.getElementById('ingest-jql').value.trim();
   if (!jql) { alert('Enter a JQL query.'); return; }
-  const btn = document.getElementById('ingest-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Ingesting…';
+  if (mode === 'rebuild' &&
+      !confirm('Re-ingest will DELETE all indexed tickets and rebuild from scratch. Continue?')) return;
+
+  document.querySelectorAll('#tab-ingest .ingest-actions button').forEach(b => b.disabled = true);
   document.getElementById('ingest-spinner').classList.remove('hidden');
-  const r = await post('/api/ingest/start', { jql });
-  if (r.status === 'already_running') {
-    alert('Ingest already running.');
-    loadIngestStatus();
-    return;
-  }
+
+  const body = { jql };
+  if (mode === 'rebuild')      body.full = true;
+  else if (mode === 'refresh') body.mode = 'refresh';
+  const r = await post('/api/ingest/start', body);
+
+  if (r.status === 'already_running') { alert('Ingest already running.'); loadIngestStatus(); return; }
   if (!r.ok) {
     alert(`Error: ${r.error}`);
-    btn.disabled = false;
-    btn.textContent = '▶ Start Ingest';
+    document.querySelectorAll('#tab-ingest .ingest-actions button').forEach(b => b.disabled = false);
     document.getElementById('ingest-spinner').classList.add('hidden');
     return;
   }
@@ -698,6 +719,7 @@ function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'
 window.onload = () => {
   loadIngestStatus();
   loadIngestJQL();
+  loadSchedule();
   loadLLMStatus();
 };
 setInterval(loadIngestStatus, 5000);
