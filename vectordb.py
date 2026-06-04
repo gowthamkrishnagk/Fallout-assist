@@ -32,6 +32,11 @@ DOC_COLS    = ("workarounds_docs_step", "workarounds_docs_error")
 # those are handled by the back-off retry in _search_dual.)
 _HNSW_META = {"hnsw:search_ef": 256}
 
+# Per-collection candidate pool for dual (step+error) search. Must stay <= the
+# collection's search_ef (256). Large enough to cover a same-step cluster so the
+# step-list and error-list overlap and true both-sides matches score ~1.0.
+_DUAL_FETCH = 250
+
 
 def _get_col(index_path: str, col_name: str):
     key = (index_path, col_name)
@@ -141,10 +146,15 @@ def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k, inde
         scores = {}
         if emb is None or count == 0:
             return scores
-        # Back off if the collection's search_ef is below the requested n_results
-        # (older collections built with the small default ef) — halve and retry
-        # rather than crash, so a query always returns its best available matches.
-        n   = min(top_k * 3, count)
+        # Fetch a LARGE candidate pool, not just top_k*3: step and error are
+        # scored from separate collections and averaged, so a ticket only gets
+        # credit on a side if it appears in THAT side's results. When many tickets
+        # share a step (e.g. dozens of "Cancel Addon" tickets with different
+        # errors), a small pool lets the step-list and error-list miss each other,
+        # scoring a genuine both-sides match at only ~0.5. A big pool (capped at
+        # the collection's search_ef) makes the lists overlap so true matches
+        # score ~1.0. Back off on the hnswlib "ef too small" error rather than crash.
+        n   = min(_DUAL_FETCH, count)
         res = None
         while n >= 1:
             try:
