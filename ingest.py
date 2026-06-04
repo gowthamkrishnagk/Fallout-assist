@@ -94,6 +94,19 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+def _to_epoch(s: str) -> float:
+    """Jira datetime ('2026-06-04T19:40:12.345+0530') -> epoch seconds, for
+    recency sorting. Returns 0.0 if unparseable."""
+    if not s:
+        return 0.0
+    try:
+        # Normalize the '+0530' offset to '+05:30' so fromisoformat accepts it.
+        s2 = re.sub(r'([+-]\d{2})(\d{2})$', r'\1:\2', s.strip())
+        return datetime.fromisoformat(s2).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _clean_for_embed(text: str) -> str:
     """Strip MSISDNs, order numbers, Salesforce IDs, emoji/mojibake and markup —
     keep step/error context. Delegates to the shared canonical cleaner so ingest
@@ -192,7 +205,8 @@ def _get_assignee_comments(issue) -> list[dict]:
     return assignee_only if assignee_only else human[-3:]
 
 
-def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
+def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
+                since_minutes: int | None = None) -> dict:
     """Pull tickets and index them INCREMENTALLY.
 
     Only NEW or CHANGED tickets are re-embedded: a ticket whose Jira `updated`
@@ -201,11 +215,20 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
     last run (e.g. reopened) are pruned from the index. Pass full=True to force a
     complete rebuild (e.g. after changing the embedding model or the format).
 
+    since_minutes: when set (and not full), only FETCH tickets updated within the
+    last N minutes (adds `updated >= -Nm` to the JQL) — used by the background
+    scheduler so a frequent run pulls just the latest tickets instead of all of
+    them. Pruning is skipped in this windowed mode (we only saw a slice).
+
     Returns {ok, indexed, skipped, up_to_date, pruned, tickets_indexed, error}.
     """
     with _ingest_lock:
         wf          = cfg["workaround_finder"]
-        jql         = wf["ingest_jql"] + " ORDER BY updated DESC"
+        windowed    = (not full) and bool(since_minutes) and since_minutes > 0
+        base_jql    = wf["ingest_jql"]
+        if windowed:
+            base_jql += f" AND updated >= -{int(since_minutes)}m"
+        jql         = base_jql + " ORDER BY updated DESC"
         index_path  = str(Path(__file__).parent / wf["index_path"])
         embed_model = cfg["embed"]["model"]
 
@@ -230,11 +253,14 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
                 vectordb.reset_ticket_collections(index_path)
 
             # Prune tickets we indexed before but that no longer match the JQL.
+            # Only in full-scope mode — a windowed fetch sees just a recent slice,
+            # so absence there does NOT mean the ticket dropped out of the JQL.
             pruned = 0
-            for key in [k for k in known if k not in fetched_keys]:
-                vectordb.delete_ticket_by_source(key, index_path)
-                known.pop(key, None)
-                pruned += 1
+            if not windowed:
+                for key in [k for k in known if k not in fetched_keys]:
+                    vectordb.delete_ticket_by_source(key, index_path)
+                    known.pop(key, None)
+                    pruned += 1
 
             # Keep only new / changed tickets — skip ones unchanged since last run.
             changed    = []
@@ -326,6 +352,7 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
                         "comment_body":   c["body"][:1000],
                         "is_assignee":    str(c["is_assignee"]),
                         "comment_index":  j,
+                        "updated_ts":     _to_epoch(updated),   # recency tie-break
                     })
 
                 if progress_cb and i % 20 == 0:

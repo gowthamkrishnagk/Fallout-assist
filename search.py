@@ -87,6 +87,7 @@ def find_workarounds(query: str, cfg: dict) -> dict:
                 "error":       meta.get("error", ""),
                 "step":        meta.get("step", ""),
                 "score":       score,
+                "updated_ts":  meta.get("updated_ts", 0),
             })
         else:
             # Drop unrelated docs entirely: a document below the match threshold
@@ -106,6 +107,14 @@ def find_workarounds(query: str, cfg: dict) -> dict:
     # through, keeping only candidates about the SAME failure. No-op if disabled
     # or the LLM is unavailable.
     candidates = _llm_rerank(step, error, candidates, cfg)
+
+    # Recency weighting: among matches of similar strength (same 0.01 score
+    # bucket — e.g. the many tickets that tie at 1.0 for an identical error),
+    # prefer the most recently-updated ticket. Newer resolutions reflect the
+    # current system/process. A clearly better match (bigger score) still wins;
+    # docs carry no date (updated_ts=0) so they fall after tied tickets.
+    candidates.sort(key=lambda c: (round(c["score"], 2), c.get("updated_ts", 0)),
+                    reverse=True)
 
     strong  = [c for c in candidates if c["score"] >= threshold]
     context = [c for c in candidates if c["score"] <  threshold]

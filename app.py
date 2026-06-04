@@ -6,6 +6,7 @@ Run: uvicorn app:app --reload --port 8010
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 # Use the OS (Windows) certificate store for TLS so corporate proxy / inspection
@@ -60,6 +61,56 @@ def _release():
     global _running
     with _run_lock:
         _running = False
+
+
+# ── Background auto-ingest scheduler ─────────────────────────────────────────
+# Periodically pulls the LATEST tickets in the background. It re-reads config
+# every minute, so changing the interval (or turning it off) via the schedule
+# API takes effect within ~1 min without a restart. Each run is windowed +
+# incremental: it fetches only tickets updated in the lookback window and
+# re-embeds just the new/changed ones — never the whole project.
+
+def _auto_ingest_loop():
+    import ingest as ing
+    elapsed = 0   # whole minutes since the last run
+    while True:
+        time.sleep(60)
+        try:
+            cfg      = load_config()
+            interval = int(cfg["workaround_finder"].get("auto_ingest_minutes", 0) or 0)
+        except Exception as e:
+            print(f"[AUTO-INGEST] config read failed: {e}")
+            continue
+        if interval <= 0:        # disabled
+            elapsed = 0
+            continue
+        elapsed += 1
+        if elapsed < interval:
+            continue
+        elapsed = 0
+
+        if not _try_acquire():   # a manual ingest/upload is in progress — skip this tick
+            print("[AUTO-INGEST] skipped — another ingest is running")
+            continue
+        try:
+            lookback = int(cfg["workaround_finder"].get("auto_ingest_lookback_minutes", 1440) or 1440)
+            result   = ing.ingest_jira(cfg, since_minutes=lookback)
+            if result.get("ok"):
+                print(f"[AUTO-INGEST] {result.get('tickets_indexed', 0)} tickets indexed, "
+                      f"{result.get('up_to_date', 0)} unchanged "
+                      f"(last {lookback} min)")
+            else:
+                print(f"[AUTO-INGEST] FAILED: {result.get('error')}")
+        except Exception as e:
+            print(f"[AUTO-INGEST] EXCEPTION: {e}")
+        finally:
+            _release()
+
+
+@app.on_event("startup")
+def _start_auto_ingest():
+    threading.Thread(target=_auto_ingest_loop, daemon=True).start()
+    print("[AUTO-INGEST] scheduler started (interval read live from config)")
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -120,6 +171,35 @@ def ingest_status():
     s   = ing.get_status(cfg)
     s["running"] = _running
     return s
+
+
+@app.get("/api/ingest/schedule")
+def ingest_schedule_get():
+    """Current background auto-ingest schedule."""
+    wf = load_config()["workaround_finder"]
+    return {
+        "ok":               True,
+        "minutes":          int(wf.get("auto_ingest_minutes", 0) or 0),   # 0 = off
+        "lookback_minutes": int(wf.get("auto_ingest_lookback_minutes", 1440) or 1440),
+        "running":          _running,
+    }
+
+
+@app.post("/api/ingest/schedule")
+def ingest_schedule_set(body: dict):
+    """Set the background auto-ingest cadence (persisted to config.json).
+    minutes=0 disables it. Common: 10 (10 min), 60 (hourly), 1440 (daily).
+    Takes effect within ~1 minute — no restart needed."""
+    cfg = load_config()
+    if "minutes" in body:
+        cfg["workaround_finder"]["auto_ingest_minutes"] = max(0, int(body["minutes"]))
+    if "lookback_minutes" in body:
+        cfg["workaround_finder"]["auto_ingest_lookback_minutes"] = max(1, int(body["lookback_minutes"]))
+    save_config(cfg)
+    wf = cfg["workaround_finder"]
+    return {"ok": True,
+            "minutes":          int(wf.get("auto_ingest_minutes", 0) or 0),
+            "lookback_minutes": int(wf.get("auto_ingest_lookback_minutes", 1440) or 1440)}
 
 
 # ── Ask ───────────────────────────────────────────────────────────────────────
