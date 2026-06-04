@@ -19,7 +19,7 @@ load_dotenv()
 
 import embedder
 import vectordb
-from textclean import clean_text, is_pointer_comment
+from textclean import clean_text, is_pointer_comment, extract_fix_block
 
 _STATE_FILE  = Path(__file__).parent / "trackers" / "ingest_state.json"
 _ingest_lock = threading.Lock()
@@ -193,9 +193,12 @@ def _get_assignee_comments(issue) -> list[dict]:
         return False
 
     # All substantive human comments (bots excluded). Pointer comments
-    # ("duplicate, refer to SAC-x") are dropped — they describe no fix.
+    # ("duplicate, refer to SAC-x") are dropped — they describe no fix. When a
+    # comment carries a === FIX === block, store ONLY that block as the resolution.
     human = [
-        {"author": c.author.displayName, "body": _clean(c.body), "is_assignee": _is_assignee(c)}
+        {"author": c.author.displayName,
+         "body": extract_fix_block(_clean(c.body)),
+         "is_assignee": _is_assignee(c)}
         for c in comments
         if c.body and len(c.body.strip()) > 40
         and not _is_bot(c.author.displayName)

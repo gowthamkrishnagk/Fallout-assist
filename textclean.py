@@ -65,6 +65,26 @@ def is_pointer_comment(body: str) -> bool:
     return bool(_POINTER_RE.search(body)) and has_ref
 
 
+_FIX_BLOCK_RE = re.compile(r'===\s*FIX\s*===\s*(.*?)\s*===\s*END\s*===',
+                           re.IGNORECASE | re.DOTALL)
+_FIX_OPEN_RE  = re.compile(r'===\s*FIX\s*===\s*(.+)$', re.IGNORECASE | re.DOTALL)
+
+
+def extract_fix_block(body: str) -> str:
+    """If a comment contains a `=== FIX === ... === END ===` block, return just
+    that block (markers normalized), dropping any surrounding chatter — so the
+    stored resolution is the clean fix the engineer wrote. Tolerates a missing
+    `=== END ===` (takes everything after `=== FIX ===`). Returns the body
+    unchanged when there is no block."""
+    if not body:
+        return body
+    m = _FIX_BLOCK_RE.search(body) or _FIX_OPEN_RE.search(body)
+    if not m:
+        return body
+    inner = m.group(1).strip()
+    return f"=== FIX ===\n{inner}\n=== END ==="
+
+
 def referenced_ticket(body: str) -> str:
     """Extract the referenced ticket key from a pointer comment ('...SAC-231619'),
     uppercased, or '' if none found."""
