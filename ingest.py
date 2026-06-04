@@ -223,10 +223,11 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
             known        = {} if full else dict(state.get("tickets", {}))
             fetched_keys = {issue.key for issue in issues}
 
-            # Full rebuild → wipe every existing ticket chunk first (docs untouched)
-            # so stale chunks from a previous ingest can't linger.
+            # Full rebuild → recreate the ticket collections from scratch (docs
+            # untouched) so stale chunks can't linger AND the collections get
+            # correct HNSW search_ef instead of the small legacy default.
             if full:
-                vectordb.delete_tickets(index_path)
+                vectordb.reset_ticket_collections(index_path)
 
             # Prune tickets we indexed before but that no longer match the JQL.
             pruned = 0

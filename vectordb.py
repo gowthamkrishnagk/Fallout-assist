@@ -25,13 +25,22 @@ TICKET_COLS = ("workarounds_step", "workarounds_error")
 DOC_COLS    = ("workarounds_docs_step", "workarounds_docs_error")
 
 
+# hnswlib raises "Cannot return the results ... ef or M is too small" when a
+# query asks for more results (n_results) than the index's search_ef. Chroma's
+# default search_ef is 10, which is below our over-fetch (top_k * 3), so set a
+# larger ef on new collections. (Ignored for collections that already exist —
+# those are handled by the back-off retry in _search_dual.)
+_HNSW_META = {"hnsw:search_ef": 256}
+
+
 def _get_col(index_path: str, col_name: str):
     key = (index_path, col_name)
     if key not in _cols:
         if index_path not in _clients:
             Path(index_path).mkdir(parents=True, exist_ok=True)
             _clients[index_path] = chromadb.PersistentClient(path=index_path)
-        _cols[key] = _clients[index_path].get_or_create_collection(col_name)
+        _cols[key] = _clients[index_path].get_or_create_collection(
+            col_name, metadata=_HNSW_META)
     return _cols[key]
 
 
@@ -91,6 +100,23 @@ def delete_ticket_by_source(source_id: str, index_path: str) -> int:
     return _delete_by_source(TICKET_COLS, source_id, index_path)
 
 
+def reset_ticket_collections(index_path: str):
+    """Drop and recreate the ticket collections so a full rebuild gets correct
+    HNSW params (search_ef) even if the old collections were built with the small
+    default ef. Document collections are left untouched."""
+    if index_path not in _clients:
+        Path(index_path).mkdir(parents=True, exist_ok=True)
+        _clients[index_path] = chromadb.PersistentClient(path=index_path)
+    client = _clients[index_path]
+    for col_name in TICKET_COLS:
+        try:
+            client.delete_collection(col_name)
+        except Exception:
+            pass
+        _cols.pop((index_path, col_name), None)
+        _get_col(index_path, col_name)   # recreate eagerly with _HNSW_META
+
+
 def delete_docs_by_source(source_id: str, index_path: str) -> int:
     return _delete_by_source(DOC_COLS, source_id, index_path)
 
@@ -115,7 +141,21 @@ def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k, inde
         scores = {}
         if emb is None or count == 0:
             return scores
-        res = col.query(query_embeddings=[emb], n_results=min(top_k * 3, count))
+        # Back off if the collection's search_ef is below the requested n_results
+        # (older collections built with the small default ef) — halve and retry
+        # rather than crash, so a query always returns its best available matches.
+        n   = min(top_k * 3, count)
+        res = None
+        while n >= 1:
+            try:
+                res = col.query(query_embeddings=[emb], n_results=n)
+                break
+            except RuntimeError as e:
+                if "ef or M" not in str(e) and "Cannot return" not in str(e):
+                    raise
+                n //= 2
+        if not res:
+            return scores
         for id_, doc, meta, dist in zip(
             res["ids"][0], res["documents"][0],
             res["metadatas"][0], res["distances"][0]
