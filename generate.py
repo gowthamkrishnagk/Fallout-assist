@@ -85,7 +85,24 @@ def _generate_one(prompt: str, provider: str, model: str, cfg: dict) -> dict:
     raise ValueError(f"Unknown provider: {provider}")
 
 
-def generate(prompt: str, cfg: dict) -> dict:
+def _resolve_job(cfg: dict, job: str):
+    """Per-job provider/model override so different jobs spread across free
+    providers (Groq / Cerebras / NVIDIA) instead of draining one quota.
+
+    Priority: explicit cfg["jobs"][job] → built-in preference → global default.
+    Built-in: synthesis (the quality-critical step) prefers Cerebras gpt-oss-120b
+    when a Cerebras key is present, so the answer uses the strongest free model
+    without forcing it on users who don't have that key (then it stays on global).
+    Returns (provider_or_None, model_or_None)."""
+    jobs = cfg.get("jobs") or {}
+    if job in jobs:
+        return jobs[job].get("provider"), jobs[job].get("model")
+    if job == "synthesis" and os.getenv("CEREBRAS_API_KEY", "").strip():
+        return "cerebras", "gpt-oss-120b"
+    return None, None
+
+
+def generate(prompt: str, cfg: dict, job: str | None = None) -> dict:
     """Generate with automatic provider failover.
 
     Tries the configured provider first, then each provider in cfg["fallback"]
@@ -93,17 +110,25 @@ def generate(prompt: str, cfg: dict) -> dict:
     transparently rolls to Cerebras, then to local Ollama (unlimited). The primary
     uses cfg["model"]; fallbacks use cfg["fallback_models"][p] or DEFAULT_MODELS.
 
+    job: optional job name ("synthesis"/"rerank"/"parse") — routes that job to its
+    own provider/model (see _resolve_job) so quota spreads across providers. The
+    fallback chain still applies, so a job's provider 429 rolls onward as usual.
+
     Returns {"answer", "provider", "model"} — provider/model reflect whoever
     actually answered, so the UI shows which one was used. Raises only if ALL fail.
     cfg = config["llm"]"""
-    primary  = cfg.get("provider", "local")
+    job_prov, job_model = _resolve_job(cfg, job) if job else (None, None)
+    primary  = job_prov or cfg.get("provider", "local")
     fallback = cfg.get("fallback", []) or []
     order    = [primary] + [p for p in fallback if p != primary]
 
     errors = []
     for i, prov in enumerate(order):
-        model = cfg.get("model") if prov == primary else \
-                (cfg.get("fallback_models", {}) or {}).get(prov) or DEFAULT_MODELS.get(prov)
+        if prov == primary:
+            model = job_model or (cfg.get("model") if not job_prov else None) \
+                    or DEFAULT_MODELS.get(prov)
+        else:
+            model = (cfg.get("fallback_models", {}) or {}).get(prov) or DEFAULT_MODELS.get(prov)
         try:
             result = _generate_one(prompt, prov, model, cfg)
             if i > 0:

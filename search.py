@@ -196,7 +196,7 @@ def _llm_rerank(step: str, error: str, candidates: list, cfg: dict) -> list:
         "If none are relevant, return []. Output nothing but the JSON array."
     )
     try:
-        out = g.generate(prompt, cfg["llm"]).get("answer", "")
+        out = g.generate(prompt, cfg["llm"], job="rerank").get("answer", "")
         m   = re.search(r'\[[\d,\s]*\]', out)
         if not m:
             print("[RERANK] no JSON array returned — keeping cosine order")
@@ -264,7 +264,7 @@ def _llm_parse(raw: str, cfg: dict) -> tuple[str, str]:
         f"Query:\n{raw[:800]}\n\nJSON:"
     )
     try:
-        out = g.generate(prompt, cfg["llm"]).get("answer", "")
+        out = g.generate(prompt, cfg["llm"], job="parse").get("answer", "")
         m   = re.search(r'\{.*\}', out, re.DOTALL)
         if not m:
             print("[PARSE] LLM returned no JSON — falling back to raw search")
@@ -279,13 +279,22 @@ def _llm_parse(raw: str, cfg: dict) -> tuple[str, str]:
         return "", ""
 
 
-def build_prompt(query: str, result: dict) -> str:
-    """Build LLM prompt only when needed (multiple strong matches → synthesize).
+NO_FIX_SENTINEL = "NO_RELIABLE_WORKAROUND"
 
-    Only strong (>= threshold) matches are given to the model. Weak context is
-    deliberately excluded: it is below the relevance bar and small local models
-    can't tell it apart from the real sources, so it contaminates the answer
-    (e.g. a 49% doc about a different error leaking into a Suspend workaround)."""
+
+def build_prompt(query: str, result: dict) -> str:
+    """Prompt the LLM to produce a grounded workaround in the `=== FIX ===`
+    format — a clean, paste-ready resolution comment — WITHOUT hallucinating.
+
+    Anti-hallucination guardrails:
+      - Only strong (>= threshold) matches are given as sources. Weak context is
+        excluded so a near-miss can't leak into the answer.
+      - The model is told to use ONLY steps present in the sources and to invent
+        nothing (no field names / values not in the sources).
+      - It has an explicit escape hatch: if the sources don't contain a clear,
+        applicable fix it must reply exactly NO_RELIABLE_WORKAROUND, so the caller
+        shows the raw best comment instead of a made-up one.
+    """
     strong = result["strong"][:6]
 
     sources = ""
@@ -299,12 +308,22 @@ def build_prompt(query: str, result: dict) -> str:
         sources += f"\n--- Source {i}: {label} ---\n{body[:600]}\n"
 
     return (
-        "You are a Jira order-fallout support assistant. "
-        "A new issue needs a workaround:\n\n"
+        "You are a Salesforce order-fallout support assistant. A new issue needs a "
+        "workaround:\n\n"
         f"{query}\n\n"
-        "The following past resolved ticket comments are the most similar to this issue. "
-        "Synthesize a clear, actionable workaround based ONLY on these comments. "
-        "Do not invent steps not present in the sources.\n"
+        "Below are the most similar PAST RESOLVED tickets. Write the workaround "
+        "based STRICTLY on these sources.\n"
+        "Rules:\n"
+        "- Use ONLY actions, field names, and values that appear in the sources.\n"
+        "- Do NOT invent steps. Do NOT add generic advice.\n"
+        f"- If the sources do not contain a clear, applicable fix for THIS step and "
+        f"error, reply with exactly: {NO_FIX_SENTINEL}\n"
         f"{sources}\n"
-        "Workaround:"
+        "Output EXACTLY this block and nothing else (omit the Root Cause line if the "
+        "sources don't state a cause):\n"
+        "=== FIX ===\n"
+        "Root Cause: <one line, only if supported by the sources>\n"
+        "1. <action taken from the sources>\n"
+        "2. <action taken from the sources>\n"
+        "=== END ==="
     )

@@ -243,31 +243,37 @@ async def ask(body: dict):
                 "answer": "No similar tickets found. Please ingest tickets first.",
                 "strong": [], "context": [], "best_score": 0}
 
-    # Strong match(es) found — return actual comment(s) as workaround
+    synthesize = cfg["workaround_finder"].get("llm_synthesize", True)
+
+    # Strong match(es) found — produce a grounded `=== FIX ===` recommendation.
     if strong:
-        if len(strong) == 1:
-            answer   = strong[0]["comment"]
-            provider = "direct_match"
-            model    = ""
+        top_body = strong[0]["comment"]
+        # Hybrid: if the best source is ALREADY a clean === FIX === block, show it
+        # verbatim — no point re-mangling a correct human fix through the LLM.
+        if "=== fix ===" in top_body.lower() or not synthesize:
+            answer, provider, model = top_body, "direct_match", ""
         else:
-            # Multiple strong matches — try LLM synthesis, fall back to top comment
+            # Legacy / multiple comments → LLM synthesizes into the FIX format,
+            # grounded in sources only. On decline (NO_RELIABLE_WORKAROUND), empty
+            # output, or any error → fall back to the raw best comment, never invent.
             try:
-                prompt   = s.build_prompt(query_text, result)
-                gen      = g.generate(prompt, cfg["llm"])
-                answer   = gen["answer"]
-                provider = gen["provider"]
-                model    = gen["model"]
+                prompt = s.build_prompt(query_text, result)
+                gen    = g.generate(prompt, cfg["llm"], job="synthesis")
+                ans    = (gen.get("answer") or "").strip()
+                if s.NO_FIX_SENTINEL in ans or len(ans) < 10:
+                    print("[LLM] declined / empty — showing raw best comment")
+                    answer, provider, model = top_body, "direct_match", ""
+                else:
+                    answer, provider, model = ans, gen["provider"], gen["model"]
             except Exception as llm_err:
-                print(f"[LLM] fallback to direct match — {llm_err}")
-                answer   = strong[0]["comment"]
-                provider = "direct_match"
-                model    = ""
+                print(f"[LLM] synthesis failed, verbatim fallback — {llm_err}")
+                answer, provider, model = top_body, "direct_match", ""
         mode = "strong_match"
 
     else:
-        # No strong match — show top result's actual comment directly.
-        # Never use LLM for low-confidence: small local models invert or misread
-        # short resolution comments, producing answers worse than the raw text.
+        # No strong match — abstain from synthesis (the sources are below the
+        # relevance bar; generating from them is where hallucination happens).
+        # Show the nearest weak match's actual comment as a lead instead.
         top      = context[0] if context else None
         answer   = top["comment"] if top else "No similar tickets found."
         provider = "direct_match"
@@ -355,6 +361,7 @@ def llm_providers():
         # "Key saved" UI state per provider.
         "has_keys":  {p: bool(os.getenv(_key_env(p), "").strip()) for p in PROVIDERS},
         "rerank":    cfg["workaround_finder"].get("llm_rerank", False),
+        "synthesize": cfg["workaround_finder"].get("llm_synthesize", True),
     }
 
 
@@ -365,6 +372,17 @@ def llm_set_rerank(body: dict):
     cfg["workaround_finder"]["llm_rerank"] = bool(body.get("enabled", False))
     save_config(cfg)
     return {"ok": True, "enabled": cfg["workaround_finder"]["llm_rerank"]}
+
+
+@app.post("/api/llm/synthesize")
+def llm_set_synthesize(body: dict):
+    """Toggle LLM workaround synthesis on/off (persisted to config.json). When
+    off, a strong match is shown verbatim instead of being rewritten into the
+    `=== FIX ===` format."""
+    cfg = load_config()
+    cfg["workaround_finder"]["llm_synthesize"] = bool(body.get("enabled", True))
+    save_config(cfg)
+    return {"ok": True, "enabled": cfg["workaround_finder"]["llm_synthesize"]}
 
 
 @app.get("/api/llm/config")
