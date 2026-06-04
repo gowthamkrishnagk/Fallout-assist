@@ -19,7 +19,7 @@ load_dotenv()
 
 import embedder
 import vectordb
-from textclean import clean_text, is_pointer_comment, extract_fix_block
+from textclean import clean_text, extract_fix_block
 
 _STATE_FILE  = Path(__file__).parent / "trackers" / "ingest_state.json"
 _ingest_lock = threading.Lock()
@@ -193,8 +193,11 @@ def _get_assignee_comments(issue) -> list[dict]:
         return False
 
     # All substantive human comments (bots excluded). Pointer comments
-    # ("duplicate, refer to SAC-x") are dropped — they describe no fix. When a
-    # comment carries a === FIX === block, store ONLY that block as the resolution.
+    # ("duplicate, refer to SAC-x") are KEPT here on purpose — they carry the error
+    # signal, and at search time the follow-reference logic resolves them to the
+    # referenced ticket's real fix (from the index or a live Jira fetch). Dropping
+    # them here would prevent that. When a comment carries a === FIX === block,
+    # store only that block as the resolution.
     human = [
         {"author": c.author.displayName,
          "body": extract_fix_block(_clean(c.body)),
@@ -202,7 +205,6 @@ def _get_assignee_comments(issue) -> list[dict]:
         for c in comments
         if c.body and len(c.body.strip()) > 40
         and not _is_bot(c.author.displayName)
-        and not is_pointer_comment(c.body)
     ]
 
     assignee_only = [c for c in human if c["is_assignee"]]
