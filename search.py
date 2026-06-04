@@ -15,20 +15,15 @@ import re
 from pathlib import Path
 import embedder
 import vectordb
+from textclean import clean_text
 
 DEFAULT_THRESHOLD = 0.70   # cosine-similarity scale; live value from config.json (score_threshold)
 
 
 def _clean_query(text: str) -> str:
-    """Strip MSISDNs, order numbers, Salesforce IDs from raw query input."""
-    text = re.sub(r'\b[0-9][A-Za-z0-9]{14,17}\b', '', text)   # SF record IDs
-    text = re.sub(r'\b\d{6,}\b', '', text)                      # MSISDNs / order numbers
-    text = re.sub(r'(?:Order\s+Id|Order)\s*:\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\(\s*\)', '', text)
-    text = re.sub(r'\[\s*\]', '', text)
-    text = re.sub(r'\s*-\s*', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    """Normalize raw query input the SAME way ingest normalizes stored step/error
+    (shared canonical cleaner) so a query and the matching ticket embed alike."""
+    return clean_text(text)
 
 
 

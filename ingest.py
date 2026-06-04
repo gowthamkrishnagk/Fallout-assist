@@ -19,6 +19,7 @@ load_dotenv()
 
 import embedder
 import vectordb
+from textclean import clean_text
 
 _STATE_FILE  = Path(__file__).parent / "trackers" / "ingest_state.json"
 _ingest_lock = threading.Lock()
@@ -94,18 +95,10 @@ def _clean(text: str) -> str:
 
 
 def _clean_for_embed(text: str) -> str:
-    """Strip MSISDNs, order numbers, Salesforce IDs — keep step/error context.
-    Removes noise that pollutes embeddings without adding semantic meaning."""
-    # Salesforce record IDs (15-18 alphanumeric starting with a digit)
-    text = re.sub(r'\b[0-9][A-Za-z0-9]{14,17}\b', '', text)
-    # Long numeric sequences: MSISDNs (10+ digits), order numbers (6+ digits)
-    text = re.sub(r'\b\d{6,}\b', '', text)
-    # Clean up hanging labels after value removal
-    text = re.sub(r'(?:Order\s+Id|Order)\s*:\s*', '', text, flags=re.IGNORECASE)
-    # Normalize separators and whitespace
-    text = re.sub(r'\s*-\s*', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    """Strip MSISDNs, order numbers, Salesforce IDs, emoji/mojibake and markup —
+    keep step/error context. Delegates to the shared canonical cleaner so ingest
+    and search normalize identically."""
+    return clean_text(text)
 
 
 def _extract_description_fields(issue) -> str:
@@ -151,12 +144,9 @@ def _extract_error_context(issue) -> str:
             if "PR_Error_Description" in line:
                 parts = line.split(":", 1)
                 if len(parts) == 2:
-                    err = parts[1].strip()
-                    err = re.sub(r'^\*+\s*', '', err)          # strip leading wiki bold *
-                    err = re.sub(r'\*', '', err)               # strip remaining * markers
-                    err = re.sub(r'\b[0-9][A-Za-z0-9]{14,17}\b', '', err)  # strip SF IDs
-                    err = re.sub(r'\(\s*\)', '', err)          # strip empty parens
-                    err = re.sub(r'\s+', ' ', err).strip()
+                    # Same canonical cleaner as Source 2 and the query side, so
+                    # the identical error never embeds two different ways.
+                    err = clean_text(parts[1])
                     if err:
                         return err
 
@@ -168,7 +158,7 @@ def _extract_error_context(issue) -> str:
             # Look for lines that contain "Error" label or look like an error message
             m = re.search(r'Error(?:\s+Description)?\s*[:\|]\s*(.{20,300})', line, re.IGNORECASE)
             if m:
-                return m.group(1).strip()
+                return clean_text(m.group(1))
 
     return ""
 
@@ -285,7 +275,7 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False) -> dict:
 
                 # Extract step name from cleaned summary for focused embedding
                 step_match = re.search(r'Failed\s+Step:\s*([^\n]{5,80}?)(?:\s*$)', clean_sum, re.IGNORECASE)
-                step_name  = step_match.group(1).strip() if step_match else ''
+                step_name  = clean_text(step_match.group(1)) if step_match else ''
 
                 for j, c in enumerate(comments):
                     chunk_id = f"{issue.key}_c{j}"
