@@ -394,6 +394,46 @@ def jira_suggest_status():
     return jirabot.get_status(load_config())
 
 
+@app.post("/api/jira-suggest/config")
+def jira_suggest_config(body: dict):
+    """Persist the auto-suggest settings (config.json). Takes effect within ~1 min
+    (the poller re-reads config live). Mirrors the LLM-toggle endpoints."""
+    import jirabot
+    cfg = load_config()
+    wf  = cfg["workaround_finder"]
+    if "enabled" in body:
+        wf["jira_suggest_enabled"] = bool(body["enabled"])
+    if "dry_run" in body:
+        wf["jira_suggest_dry_run"] = bool(body["dry_run"])
+    if "minutes" in body:
+        wf["jira_suggest_minutes"] = max(0, int(body["minutes"]))
+    if "jql" in body and str(body["jql"]).strip():
+        wf["jira_suggest_jql"] = str(body["jql"]).strip()
+    if "public_base_url" in body:
+        wf["public_base_url"] = str(body["public_base_url"]).strip()
+    save_config(cfg)
+    return jirabot.get_status(cfg)
+
+
+@app.post("/api/jira-suggest/run")
+def jira_suggest_run():
+    """Trigger one auto-suggest pass on demand (background) instead of waiting for
+    the timer. Honors the dry-run flag exactly like a scheduled run."""
+    import jirabot
+    cfg = load_config()
+    if not cfg["workaround_finder"].get("jira_suggest_jql", "").strip():
+        raise HTTPException(400, "Set the inflow JQL first.")
+
+    def _run():
+        try:
+            jirabot.run_once(cfg)
+        except Exception as e:
+            print(f"[JIRA-SUGGEST] manual run failed: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "status": "started"}
+
+
 # ── Documents ─────────────────────────────────────────────────────────────────
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx", ".xls"}

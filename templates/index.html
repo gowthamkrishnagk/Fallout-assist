@@ -116,6 +116,65 @@
       <div class="status-row"><span>Documents</span><strong id="st-docs">—</strong></div>
       <div class="status-row"><span>Last Jira sync</span><strong id="st-sync">—</strong></div>
     </div>
+
+    <!-- ── Auto-suggest on inflow tickets ─────────────────────── -->
+    <div class="config-section" style="margin-top:28px">
+      <h3>🤖 Auto-Suggest on inflow tickets</h3>
+      <p class="subtitle">Periodically scans open Order Fallout tickets and posts a suggested workaround
+        as a Jira comment with 👍/👎 feedback links. It only comments on a confident match, one comment
+        per ticket — and stays silent otherwise.</p>
+
+      <div class="rerank-row">
+        <label class="switch">
+          <input type="checkbox" id="js-enabled" onchange="saveJiraSuggest()">
+          <span class="slider"></span>
+        </label>
+        <div>
+          <div class="rerank-title">Enable auto-suggest</div>
+          <div class="key-hint">Master switch for the background poller.</div>
+        </div>
+      </div>
+
+      <div class="rerank-row">
+        <label class="switch">
+          <input type="checkbox" id="js-live" onchange="toggleLiveMode(this)">
+          <span class="slider"></span>
+        </label>
+        <div>
+          <div class="rerank-title">Live mode <span id="js-mode-badge" class="badge"></span></div>
+          <div class="key-hint">OFF = <b>dry-run</b> (logs what it would post, writes nothing).
+            ON = <b>live</b> (posts real comments to Jira tickets).</div>
+        </div>
+      </div>
+
+      <label class="field-label" style="margin-top:14px">Inflow JQL</label>
+      <textarea id="js-jql" class="input-text" rows="2" style="width:100%;font-family:monospace"></textarea>
+
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:14px">
+        <div>
+          <label class="field-label">Scan interval</label><br>
+          <select id="js-minutes" class="input-text" style="width:170px">
+            <option value="0">Off</option>
+            <option value="10">Every 10 min</option>
+            <option value="15">Every 15 min</option>
+            <option value="60">Hourly</option>
+            <option value="1440">Daily</option>
+          </select>
+        </div>
+        <div style="flex:1;min-width:240px">
+          <label class="field-label">Public base URL <span class="muted" style="font-weight:400">(used in the feedback links)</span></label>
+          <input id="js-base-url" class="input-text" style="width:100%" placeholder="http://10.169.101.69:8010">
+        </div>
+      </div>
+
+      <div class="ingest-actions" style="margin-top:16px;align-items:center">
+        <button class="btn-primary" onclick="saveJiraSuggest(true)">Save</button>
+        <button class="btn-secondary" onclick="runJiraSuggestNow()">▶ Run now</button>
+        <span id="js-saved" class="hidden" style="color:#22c55e;margin-left:4px">✓ Saved</span>
+      </div>
+
+      <div id="js-status" class="subtitle" style="margin-top:14px"></div>
+    </div>
   </div>
 
   <!-- ── DOCS TAB ────────────────────────────────────────────── -->
@@ -273,7 +332,7 @@ function showTab(name) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   document.getElementById(`tab-${name}`).classList.remove('hidden');
   event.currentTarget.classList.add('active');
-  if (name === 'ingest') { loadIngestStatus(); loadSchedule(); }
+  if (name === 'ingest') { loadIngestStatus(); loadSchedule(); loadJiraSuggest(); }
   if (name === 'docs')    loadDocs();
   if (name === 'llm')   { loadLLMProviders(); loadLLMQuota(); }
   if (name === 'settings') loadConfig();
@@ -477,6 +536,72 @@ async function setSchedule() {
   const minutes = parseInt(document.getElementById('sched-select').value, 10);
   const r = await post('/api/ingest/schedule', { minutes });
   if (r.ok) loadSchedule();
+}
+
+// ── Jira auto-suggest panel ──────────────────────────────────────────────────
+async function loadJiraSuggest() {
+  const r = await get('/api/jira-suggest/status');
+  if (!r) return;
+  document.getElementById('js-enabled').checked  = !!r.enabled;
+  document.getElementById('js-live').checked      = !r.dry_run;        // live = NOT dry-run
+  document.getElementById('js-jql').value         = r.jql || '';
+  document.getElementById('js-minutes').value     = String(r.minutes ?? 0);
+  document.getElementById('js-base-url').value    = r.public_base_url || '';
+  renderJiraSuggestStatus(r);
+}
+
+function renderJiraSuggestStatus(r) {
+  const badge = document.getElementById('js-mode-badge');
+  badge.textContent      = r.dry_run ? 'DRY-RUN' : 'LIVE';
+  badge.style.background = r.dry_run ? '#334155' : '#7f1d1d';
+  badge.style.color      = r.dry_run ? '#94a3b8' : '#fca5a5';
+
+  const lr = r.last_run || {};
+  const el = document.getElementById('js-status');
+  if (lr.last_run) {
+    const did = lr.dry_run ? `${lr.would_post || 0} would post` : `${lr.posted || 0} posted`;
+    el.innerHTML = `Last run ${new Date(lr.last_run).toLocaleString()} — `
+      + `<b>${did}</b>, ${lr.silent || 0} silent, ${lr.skipped || 0} skipped `
+      + `(scanned ${lr.scanned || 0}). Tracking ${r.tracked || 0} ticket(s).`;
+  } else {
+    el.textContent = `Tracking ${r.tracked || 0} ticket(s). No run yet.`;
+  }
+}
+
+async function saveJiraSuggest(showSaved) {
+  const body = {
+    enabled:         document.getElementById('js-enabled').checked,
+    dry_run:        !document.getElementById('js-live').checked,
+    jql:             document.getElementById('js-jql').value.trim(),
+    minutes:         parseInt(document.getElementById('js-minutes').value, 10),
+    public_base_url: document.getElementById('js-base-url').value.trim(),
+  };
+  const r = await post('/api/jira-suggest/config', body);
+  renderJiraSuggestStatus(r);
+  if (showSaved) {
+    const s = document.getElementById('js-saved');
+    s.classList.remove('hidden'); setTimeout(() => s.classList.add('hidden'), 2000);
+  }
+}
+
+function toggleLiveMode(cb) {
+  if (cb.checked &&
+      !confirm('Switch to LIVE mode?\n\nThe bot will post REAL comments to Jira tickets that have a confident match.')) {
+    cb.checked = false;
+    return;
+  }
+  saveJiraSuggest();
+}
+
+async function runJiraSuggestNow() {
+  const r = await post('/api/jira-suggest/run', {});
+  if (r.status === 'started') {
+    document.getElementById('js-status').textContent = '▶ Run started — refreshing status shortly…';
+    setTimeout(loadJiraSuggest, 4000);
+    setTimeout(loadJiraSuggest, 12000);
+  } else {
+    alert(r.detail || r.error || 'Could not start run.');
+  }
 }
 
 async function loadIngestJQL() {
