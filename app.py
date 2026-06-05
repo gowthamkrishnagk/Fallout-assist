@@ -394,6 +394,14 @@ def jira_suggest_status():
     return jirabot.get_status(load_config())
 
 
+@app.get("/api/jira-suggest/previews")
+def jira_suggest_previews():
+    """The current per-ticket suggestions (would-post in dry-run / posted in live),
+    so the UI can show them instead of grepping the log."""
+    import jirabot
+    return {"ok": True, "previews": jirabot.list_previews(load_config())}
+
+
 @app.post("/api/jira-suggest/config")
 def jira_suggest_config(body: dict):
     """Persist the auto-suggest settings (config.json). Takes effect within ~1 min

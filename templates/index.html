@@ -175,6 +175,7 @@
       </div>
 
       <div id="js-status" class="subtitle" style="margin-top:14px"></div>
+      <div id="js-previews" style="margin-top:16px"></div>
     </div>
   </div>
 
@@ -552,6 +553,38 @@ async function loadJiraSuggest() {
   // edge cases (reverse proxy / different external hostname).
   document.getElementById('js-base-url').value    = r.public_base_url || window.location.origin;
   renderJiraSuggestStatus(r);
+  loadJiraSuggestPreviews();
+}
+
+async function loadJiraSuggestPreviews() {
+  const el = document.getElementById('js-previews');
+  let r;
+  try { r = await get('/api/jira-suggest/previews'); } catch (e) { el.innerHTML = ''; return; }
+  const items = (r && r.previews) || [];
+  if (!items.length) {
+    el.innerHTML = '<div class="muted" style="font-size:13px">No suggestions yet — run a scan to preview what would be posted.</div>';
+    return;
+  }
+  const badgeText = { dry_run: 'would post', posted: 'posted', improved: 'improved', exhausted: 'manual review' };
+  el.innerHTML =
+    `<div class="sources-header" style="margin-bottom:8px">Pending suggestions — ${items.length} ticket(s)</div>` +
+    items.map(p => {
+      const status = p.status || '';
+      const badge  = badgeText[status] || status;
+      const bcls   = (status === 'posted' || status === 'improved') ? 'score-strong' : 'score-weak';
+      const matched = p.matched
+        ? `<span class="muted">matched <a href="${p.matched_url}" target="_blank">${escHtml(p.matched)}</a>${p.pct ? ' · ' + p.pct + '%' : ''}</span>`
+        : '';
+      return `<div class="source-item">
+        <div class="source-header">
+          <a href="${p.key_url}" target="_blank">${escHtml(p.key)}</a>
+          <span class="source-summary">${escHtml(p.summary || '')}</span>
+          ${matched}
+          <span class="${bcls}">${badge}</span>
+        </div>
+        ${p.snippet ? `<div class="source-comment">${escHtml(p.snippet)}</div>` : ''}
+      </div>`;
+    }).join('');
 }
 
 function renderJiraSuggestStatus(r) {

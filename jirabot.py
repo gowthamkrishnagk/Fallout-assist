@@ -76,6 +76,40 @@ def get_status(cfg: dict) -> dict:
     }
 
 
+# Statuses that represent a real suggestion to show in the UI list.
+_PREVIEW_STATUSES = {"dry_run", "posted", "improved", "exhausted"}
+
+
+def list_previews(cfg: dict) -> list:
+    """The current suggestions across tracked tickets — drives the UI "Pending
+    suggestions" list so you don't have to grep the log. Built from the state file,
+    so it persists across runs (the dry-run dedup means a re-run shows 0 new, but
+    the suggestions themselves are still listed here)."""
+    state    = _load_state()
+    jira_url = (cfg.get("jira", {}).get("url", "") or "").rstrip("/")
+    def browse(k):
+        return f"{jira_url}/browse/{k}" if jira_url and k else ""
+    out = []
+    for key, st in state.items():
+        status = st.get("status")
+        if status not in _PREVIEW_STATUSES:
+            continue
+        matched = st.get("suggested_key") or ""
+        out.append({
+            "key":         key,
+            "key_url":     browse(key),
+            "summary":     st.get("summary", ""),
+            "matched":     matched,
+            "matched_url": browse(matched),
+            "pct":         st.get("pct"),
+            "snippet":     st.get("snippet", ""),
+            "status":      status,
+            "updated":     st.get("updated", ""),
+        })
+    out.sort(key=lambda x: x.get("updated", ""), reverse=True)
+    return out
+
+
 # ── Link signing ───────────────────────────────────────────────────────────────
 
 def _secret() -> bytes:
@@ -187,8 +221,10 @@ def run_once(cfg: dict) -> dict:
                 state[key] = {**(st or {}), "key": key, "status": "posted",
                               "updated": _now()}
                 continue
-            # In dry-run, don't re-preview a ticket we already previewed this cycle set.
-            if dry and st and st.get("status") == "dry_run":
+            # In dry-run, don't re-preview a ticket we already previewed — but only
+            # once we have its preview data stored (auto-heals old state from before
+            # previews were captured, so the UI list fills on the next pass).
+            if dry and st and st.get("status") == "dry_run" and st.get("snippet"):
                 skipped += 1
                 continue
 
@@ -212,6 +248,9 @@ def run_once(cfg: dict) -> dict:
             body       = _compose_comment(cfg, key, cand, pct, res["answer"])
             base_rec   = {"key": key, "suggested_key": cand, "cand_kind": kind,
                           "step": res.get("query_step", ""), "error": res.get("query_error", ""),
+                          # Preview data shown in the UI "Pending suggestions" list.
+                          "pct": pct, "snippet": (res.get("answer") or "")[:400],
+                          "summary": (getattr(issue.fields, "summary", "") or "")[:140],
                           "rejected": [], "updated": _now()}
 
             if dry:
