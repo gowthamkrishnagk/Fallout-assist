@@ -53,12 +53,13 @@ def suggest_for_query(query_text: str, cfg: dict, exclude_keys=frozenset()) -> d
                   "the same step is treated as a different problem).")
         return {**base, "mode": "no_data", "answer": answer,
                 "provider": "", "model": "", "llm_note": "",
-                "best_score": 0, "top": None}
+                "best_score": 0, "declined": False, "top": None}
 
     wf         = cfg["workaround_finder"]
     llm_on     = wf.get("llm_enabled", True)            # master LLM switch
     synthesize = llm_on and wf.get("llm_synthesize", True)
     llm_note   = ""
+    declined   = False   # True only when the LLM judged the sources have no real fix
 
     # Strong match(es) found — produce a grounded `=== FIX ===` recommendation.
     if strong:
@@ -81,8 +82,12 @@ def suggest_for_query(query_text: str, cfg: dict, exclude_keys=frozenset()) -> d
                     print("[LLM] synthesis answered by local model — distrust, verbatim")
                     answer, provider, model = top_body, "direct_match", ""
                 elif s.NO_FIX_SENTINEL in ans or len(ans) < 10:
-                    print("[LLM] declined / empty — showing raw best comment")
+                    # The model judged the matched sources contain no real workaround.
+                    # The UI still shows the raw best comment as a lead; the Jira bot
+                    # uses `declined` to STAY SILENT instead of posting a non-fix.
+                    print("[LLM] declined / empty — no reliable workaround")
                     answer, provider, model = top_body, "direct_match", ""
+                    declined = True
                 else:
                     answer, provider, model = ans, gen["provider"], gen["model"]
             except Exception as llm_err:
@@ -106,4 +111,4 @@ def suggest_for_query(query_text: str, cfg: dict, exclude_keys=frozenset()) -> d
 
     return {**base, "mode": mode, "answer": answer,
             "provider": provider, "model": model, "llm_note": llm_note,
-            "top": top}
+            "declined": declined, "top": top}

@@ -242,6 +242,15 @@ def run_once(cfg: dict) -> dict:
                 state[key] = {"key": key, "status": "no_match", "updated": _now()}
                 continue
 
+            # Quality gate: the LLM judged the matched sources have no real workaround
+            # (just questions / chatter / a bare "done"). Stay silent rather than post
+            # the raw non-fix comment.
+            if res.get("declined"):
+                improved_silent += 1
+                state[key] = {"key": key, "status": "no_match", "updated": _now()}
+                print(f"[JIRA-SUGGEST] {key}: no reliable workaround in sources — staying silent")
+                continue
+
             top        = res["top"]
             cand, kind = _cand_of(top)
             pct        = round(res.get("best_score", 0) * 100)
