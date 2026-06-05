@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -180,6 +181,34 @@ def _cand_of(top: dict) -> tuple[str, str]:
     return top.get("key", ""), "ticket"
 
 
+def looks_like_nonfix(text: str) -> bool:
+    """LLM-free guard: True when the text is an error description / cause / status
+    note rather than an actual workaround. Matters most when the LLM is unavailable
+    and we'd otherwise post the raw matched comment verbatim. Conservative — only the
+    clear description/status templates are caught; a synthesized `=== FIX ===` block
+    or any numbered steps always pass. (The LLM's own NO_RELIABLE_WORKAROUND judgment
+    catches the subtler cases.)"""
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if "=== fix" in t:
+        return False
+    # Numbered, ordered steps → it's an actual procedure, keep it.
+    if re.search(r'(?m)^\s*\d+[.)]\s+\S', text):
+        return False
+    head = t[:80]
+    # "Order Failed: … Cause: …" — the classic fault-description template (no steps).
+    if "order failed" in t and "cause" in t:
+        return True
+    if "error description" in head or head.startswith("current error"):
+        return True
+    if "sla breached" in head:
+        return True
+    if head.startswith(("cause:", "reason:", "error:", "error :")):
+        return True
+    return False
+
+
 # ── Poll + post ────────────────────────────────────────────────────────────────
 
 def run_once(cfg: dict) -> dict:
@@ -249,6 +278,14 @@ def run_once(cfg: dict) -> dict:
                 improved_silent += 1
                 state[key] = {"key": key, "status": "no_match", "updated": _now()}
                 print(f"[JIRA-SUGGEST] {key}: no reliable workaround in sources — staying silent")
+                continue
+
+            # LLM-free non-fix guard: the answer (often the raw matched comment when the
+            # LLM is off) is an error description / cause / status note, not a fix.
+            if looks_like_nonfix(res.get("answer", "")):
+                improved_silent += 1
+                state[key] = {"key": key, "status": "no_match", "updated": _now()}
+                print(f"[JIRA-SUGGEST] {key}: matched comment is a description/non-fix — staying silent")
                 continue
 
             top        = res["top"]
