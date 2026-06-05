@@ -248,8 +248,9 @@ def run_once(cfg: dict) -> dict:
             body       = _compose_comment(cfg, key, cand, pct, res["answer"])
             base_rec   = {"key": key, "suggested_key": cand, "cand_kind": kind,
                           "step": res.get("query_step", ""), "error": res.get("query_error", ""),
-                          # Preview data shown in the UI "Pending suggestions" list.
-                          "pct": pct, "snippet": (res.get("answer") or "")[:400],
+                          # Preview data shown in the UI "Pending suggestions" list —
+                          # the full suggested comment text, so it's the actual fix.
+                          "pct": pct, "snippet": (res.get("answer") or "")[:4000],
                           "summary": (getattr(issue.fields, "summary", "") or "")[:140],
                           "rejected": [], "updated": _now()}
 

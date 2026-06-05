@@ -582,7 +582,9 @@ async function loadJiraSuggestPreviews() {
           ${matched}
           <span class="${bcls}">${badge}</span>
         </div>
-        ${p.snippet ? `<div class="source-comment">${escHtml(p.snippet)}</div>` : ''}
+        ${p.snippet
+            ? `<div class="source-comment">${escHtml(p.snippet)}</div>`
+            : `<div class="muted" style="font-size:12px;margin-top:4px">Suggested comment not loaded yet — click ▶ Run now to fetch it.</div>`}
       </div>`;
     }).join('');
 }
