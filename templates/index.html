@@ -565,7 +565,7 @@ async function loadJiraSuggestPreviews() {
     el.innerHTML = '<div class="muted" style="font-size:13px">No suggestions yet — run a scan to preview what would be posted.</div>';
     return;
   }
-  const badgeText = { dry_run: 'would post', posted: 'posted', improved: 'improved', exhausted: 'manual review' };
+  const badgeText = { dry_run: 'would comment', posted: 'commented', improved: 'commented (improved)', exhausted: 'manual review' };
   el.innerHTML =
     `<div class="sources-header" style="margin-bottom:8px">Pending suggestions — ${items.length} ticket(s)</div>` +
     items.map(p => {
@@ -615,6 +615,7 @@ async function saveJiraSuggest(showSaved) {
   };
   const r = await post('/api/jira-suggest/config', body);
   renderJiraSuggestStatus(r);
+  loadJiraSuggestPreviews();   // keep the list visible/consistent across mode toggles
   if (showSaved) {
     const s = document.getElementById('js-saved');
     s.classList.remove('hidden'); setTimeout(() => s.classList.add('hidden'), 2000);
