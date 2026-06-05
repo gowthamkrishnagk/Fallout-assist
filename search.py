@@ -12,8 +12,10 @@ Strategy:
 
 import json
 import re
+from math import tanh
 from pathlib import Path
 import embedder
+import feedback
 import vectordb
 from textclean import clean_text, is_pointer_comment, referenced_ticket
 
@@ -54,7 +56,7 @@ def _resolution_quality(c: dict) -> float:
     return score
 
 
-def find_workarounds(query: str, cfg: dict) -> dict:
+def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     """
     Returns:
       {
@@ -63,7 +65,12 @@ def find_workarounds(query: str, cfg: dict) -> dict:
         threshold: float,
         best_score: float,
       }
+
+    `exclude_keys` is a set of ticket keys to drop from the results — used by the
+    Jira 👎 "improve" loop to skip workarounds already rejected on a ticket so the
+    re-match advances to a genuinely different, properly-matched fix.
     """
+    exclude_keys = {k.upper() for k in exclude_keys}
     wf          = cfg["workaround_finder"]
     index_path  = str(Path(__file__).parent / wf["index_path"])
     embed_model = cfg["embed"]["model"]
@@ -106,6 +113,8 @@ def find_workarounds(query: str, cfg: dict) -> dict:
             key = meta.get("key")
             if key in seen_tickets:
                 continue
+            if key and key.upper() in exclude_keys:
+                continue                      # rejected on this ticket — skip to next match
             comment = meta.get("comment_body", h["doc"])
             url     = meta.get("url", "")
             author  = meta.get("comment_author", "")
@@ -134,7 +143,7 @@ def find_workarounds(query: str, cfg: dict) -> dict:
                     key, comment = fetched["key"], fetched["comment"]
                     url, author  = fetched["url"], fetched.get("author", "")
                     # keep meta (the duplicate's step/error/summary — same failure)
-                if key in seen_tickets:
+                if key in seen_tickets or (key and key.upper() in exclude_keys):
                     continue
 
             seen_tickets.add(key)
@@ -171,31 +180,72 @@ def find_workarounds(query: str, cfg: dict) -> dict:
     # or the LLM is unavailable.
     candidates = _llm_rerank(step, error, candidates, cfg)
 
+    # Feedback "training": nudge each candidate by the net 👍/👎 it has earned for
+    # THIS failure. rank_score = raw cosine + a bounded delta — used only for
+    # ordering and the strong/context split; the raw `score` is left untouched so
+    # the UI's "% match" badge stays honest. Likes float a workaround up, dislikes
+    # sink it (softly — it can drop below threshold but is never erased).
+    _apply_feedback(step, error, candidates, cfg, threshold)
+
     # Order matches of similar strength (same 0.01 score bucket — e.g. the many
     # tickets that tie at 1.0 for an identical error) by, in priority:
-    #   1. cosine match strength  (a clearly better match still wins)
+    #   1. feedback-adjusted match strength (likes/dislikes reorder ties)
     #   2. resolution quality      (best-resolved ticket feeds the answer/synthesis)
     #   3. recency                 (newest among equally-good resolutions)
     # All LLM-free, so it costs no Groq/OpenAI quota.
     candidates.sort(
-        key=lambda c: (round(c["score"], 2),
+        key=lambda c: (round(c["rank_score"], 2),
                        round(_resolution_quality(c)),
                        c.get("updated_ts", 0)),
         reverse=True)
 
-    strong  = [c for c in candidates if c["score"] >= threshold]
-    context = [c for c in candidates if c["score"] <  threshold]
+    strong  = [c for c in candidates if c["rank_score"] >= threshold]
+    context = [c for c in candidates if c["rank_score"] <  threshold]
 
     # Best score reflects the ACTUAL candidates shown — not the raw hits — so a
     # dropped pointer/duplicate (e.g. an 82% "refer to SAC-x" whose target isn't
     # indexed) doesn't leave a misleading "best: 82%" badge on the result.
     best_score = max((c["score"] for c in candidates), default=0.0)
     return {
-        "strong":     strong,
-        "context":    context,
-        "threshold":  threshold,
-        "best_score": round(best_score, 3),
+        "strong":      strong,
+        "context":     context,
+        "threshold":   threshold,
+        "best_score":  round(best_score, 3),
+        "query_step":  step,
+        "query_error": error,
     }
+
+
+def _apply_feedback(step: str, error: str, candidates: list, cfg: dict, threshold: float):
+    """Annotate each candidate in place with feedback-derived fields:
+      feedback_net — net 👍/👎 this workaround has earned for THIS failure
+      feedback_adj — the signed ranking delta applied (0.0 when no votes)
+      rank_score   — cosine score plus the delta (used for ordering + strong split)
+      curated      — True once net likes cross feedback_curate_min (a repeatedly
+                     confirmed "verified" fix)
+      feedback     — "curated" | "boosted" | "demoted" | "" (UI tag + synthesis signal)
+    The delta is tanh(net_votes / 2) * weight, so it saturates: one bad vote nudges,
+    a pile of them caps out — a workaround can never be hard-buried by a single noisy
+    click. A *curated* fix is pinned at/above threshold so a repeatedly-confirmed
+    workaround stays a strong match (and keeps feeding synthesis) for its failure."""
+    wf         = cfg["workaround_finder"]
+    weight     = wf.get("feedback_weight", 0.15)
+    curate_min = wf.get("feedback_curate_min", 3)
+    for c in candidates:
+        key = c.get("key") if c.get("type") == "ticket" else c.get("filename")
+        net = feedback.net_votes(cfg, c.get("type", "ticket"), key, step, error)
+        adj = tanh(net / 2) * weight if net else 0.0
+        curated = net >= curate_min
+        rank = c["score"] + adj
+        if curated:
+            rank = max(rank, threshold + 0.001)   # pin verified fixes as strong
+        c["feedback_net"] = net
+        c["feedback_adj"] = round(adj, 4)
+        c["rank_score"]   = rank
+        c["curated"]      = curated
+        c["feedback"]     = ("curated" if curated else
+                             "boosted" if net > 0 else
+                             "demoted" if net < 0 else "")
 
 
 def _llm_rerank(step: str, error: str, candidates: list, cfg: dict) -> list:
@@ -341,10 +391,16 @@ def build_prompt(query: str, result: dict) -> str:
       - It has an explicit escape hatch: if the sources don't contain a clear,
         applicable fix it must reply exactly NO_RELIABLE_WORKAROUND, so the caller
         shows the raw best comment instead of a made-up one.
+
+    Feedback-aware: each source is tagged with the human 👍/👎 it earned for THIS
+    failure (from feedback.py), and the model is told to prefer VERIFIED/confirmed
+    sources and steer away from ones marked wrong — so accumulated feedback raises
+    the quality of the generated workaround, not just the ordering.
     """
     strong = result["strong"][:6]
 
-    sources = ""
+    sources    = ""
+    has_verified = False
     for i, h in enumerate(strong, 1):
         if h["type"] == "ticket":
             label = f"{h['key']} (score {h['score']:.2f}) — comment by {h['author']}"
@@ -352,7 +408,23 @@ def build_prompt(query: str, result: dict) -> str:
         else:
             label = f"Doc '{h['filename']}' (score {h['score']:.2f})"
             body  = h["comment"]
+        # Human feedback signal for this source on this failure.
+        net = h.get("feedback_net", 0)
+        if h.get("curated"):
+            label += f"  [✅ VERIFIED — confirmed working {net}× for this failure; PREFER THIS]"
+            has_verified = True
+        elif net > 0:
+            label += f"  [👍 confirmed helpful {net}×]"
+        elif net < 0:
+            label += f"  [👎 marked wrong {-net}× — use only if clearly applicable]"
         sources += f"\n--- Source {i}: {label} ---\n{body[:600]}\n"
+
+    feedback_rule = (
+        "- Sources are tagged with human feedback. PREFER steps from VERIFIED / "
+        "👍-confirmed sources, and avoid relying on a 👎 source unless it is the only "
+        "one that clearly fits.\n"
+        if any(h.get("feedback_net") for h in strong) or has_verified else ""
+    )
 
     return (
         "You are a Salesforce order-fallout support assistant. A new issue needs a "
@@ -363,6 +435,7 @@ def build_prompt(query: str, result: dict) -> str:
         "Rules:\n"
         "- Use ONLY actions, field names, and values that appear in the sources.\n"
         "- Do NOT invent steps. Do NOT add generic advice.\n"
+        f"{feedback_rule}"
         f"- If the sources do not contain a clear, applicable fix for THIS step and "
         f"error, reply with exactly: {NO_FIX_SENTINEL}\n"
         f"{sources}\n"

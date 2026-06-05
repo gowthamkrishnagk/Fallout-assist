@@ -119,6 +119,28 @@ h3   { font-size: 15px; font-weight: 600; color: #e2e8f0; margin-bottom: 10px; }
                cursor: pointer; margin-left: auto; white-space: nowrap; }
 .expand-btn:hover { border-color: #475569; color: #94a3b8; }
 
+/* ── 👍/👎 feedback ─────────────────────────────────────────────────── */
+.fb-bar         { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                  margin-top: 14px; padding-top: 12px; border-top: 1px solid #334155; }
+.fb-bar .fb-label { font-size: 13px; color: #94a3b8; font-weight: 500; margin-right: 2px; }
+.fb-group       { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.fb-group-src   { margin-left: 8px; }
+.fb-label       { font-size: 11px; color: #64748b; font-weight: 500; margin-right: 2px; }
+.fb-btn         { background: none; border: 1px solid #334155; border-radius: 6px;
+                  font-size: 13px; line-height: 1; padding: 3px 7px; cursor: pointer;
+                  filter: grayscale(0.6); opacity: 0.75; transition: all .12s; }
+.fb-btn:hover:not(:disabled) { filter: none; opacity: 1; border-color: #475569; }
+.fb-btn:disabled { cursor: default; }
+.fb-up.voted    { filter: none; opacity: 1; border-color: #22c55e; background: #14532d; }
+.fb-down.voted  { filter: none; opacity: 1; border-color: #ef4444; background: #4c1d1d; }
+.fb-thanks      { font-size: 11px; color: #22c55e; display: none; }
+.fb-done .fb-thanks { display: inline; }
+
+.fb-tag         { font-size: 11px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
+.fb-tag-up      { background: #14532d; color: #86efac; }
+.fb-tag-down    { background: #3f1d2e; color: #fca5a5; }
+.fb-tag-curated { background: #134e4a; color: #5eead4; border: 1px solid #2dd4bf; font-weight: 600; }
+
 .source-desc { background: #0a1628; border: 1px solid #1e293b; border-radius: 8px;
                padding: 10px 12px; margin: 8px 0 6px; font-size: 12px; }
 .desc-row    { display: flex; gap: 10px; padding: 3px 0;

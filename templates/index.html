@@ -52,9 +52,17 @@
       <div class="result-box">
         <div class="result-header">
           <span>💡 Suggested Workaround</span>
+          <span id="result-verified" class="fb-tag fb-tag-curated hidden">✅ Verified fix</span>
           <span id="result-provider" class="badge"></span>
         </div>
         <div id="answer-text" class="answer-text"></div>
+
+        <div id="answer-feedback" class="fb-bar hidden">
+          <span class="fb-label">Was this workaround helpful?</span>
+          <button class="fb-btn fb-up"   title="Good workaround" onclick="sendFeedbackMain('up', this)">👍 Yes</button>
+          <button class="fb-btn fb-down" title="Wrong — improve it" onclick="sendFeedbackMain('down', this)">👎 No</button>
+          <span class="fb-thanks">Thanks — noted ✓</span>
+        </div>
       </div>
 
       <div id="sources-box" class="sources-box hidden">
@@ -272,6 +280,9 @@ function showTab(name) {
 }
 
 // ── ASK ──────────────────────────────────────────────────────────────────────
+// Query context + matches, stashed so a 👍/👎 can be scoped to THIS failure.
+let _queryStep = '', _queryError = '', _queryRaw = '', _topMatch = null, _sources = [];
+
 async function doAsk() {
   const raw = document.getElementById('ask-query').value.trim();
   if (!raw) { alert('Enter a ticket ID, step name, or error description.'); return; }
@@ -303,16 +314,50 @@ async function doAsk() {
               + (r.llm_note ? `  •  ⚠️ ${r.llm_note}` : '');
   showEl('ask-result');
 
+  // Stash failure context + the match that produced the answer so 👍/👎 votes
+  // are scoped to THIS step+error (the normalized failure, not the raw text).
+  _queryStep  = r.query_step  || '';
+  _queryError = r.query_error || '';
+  _queryRaw   = raw;
+  _topMatch   = (r.strong || [])[0] || (r.context || [])[0] || null;
+
+  // Reset + show the answer-level feedback control (only when there's a match).
+  const fbMain = document.getElementById('answer-feedback');
+  resetFeedbackGroup(fbMain);
+  fbMain.classList.toggle('hidden', !_topMatch);
+
+  // "✅ Verified fix" badge when the answer's top match is a curated (repeatedly
+  // confirmed) workaround for this failure.
+  const vrf = document.getElementById('result-verified');
+  const isCurated = !!(_topMatch && _topMatch.curated);
+  if (isCurated && _topMatch.feedback_net) vrf.textContent = `✅ Verified fix ·${_topMatch.feedback_net}×`;
+  else vrf.textContent = '✅ Verified fix';
+  vrf.classList.toggle('hidden', !isCurated);
+
   // Strong matched comments — show as primary sources
   const allSources = [...(r.strong || []), ...(r.context || [])];
+  _sources = allSources;
   if (allSources.length) {
     const list = document.getElementById('sources-list');
-    list.innerHTML = allSources.map(s => {
+    list.innerHTML = allSources.map((s, i) => {
       const isStrong = (r.strong||[]).includes(s);
       const pct      = Math.round(s.score * 100);
       const badge    = isStrong
         ? `<span class="score-strong">${pct}% match</span>`
         : `<span class="score-weak">${pct}% match</span>`;
+
+      // "% match" stays the raw cosine; feedback influence is shown as a chip.
+      const fbTag = s.feedback === 'curated'
+        ? `<span class="fb-tag fb-tag-curated">✅ Verified fix${s.feedback_net ? ' ·' + s.feedback_net + '×' : ''}</span>`
+        : s.feedback === 'boosted'
+        ? '<span class="fb-tag fb-tag-up">👍 boosted</span>'
+        : s.feedback === 'demoted'
+        ? '<span class="fb-tag fb-tag-down">👎 demoted</span>' : '';
+      const fbBtns = `<span class="fb-group fb-group-src">
+        <button class="fb-btn fb-up"   title="Correct" onclick="sendFeedbackSrc(${i},'up',this)">👍</button>
+        <button class="fb-btn fb-down" title="Wrong"   onclick="sendFeedbackSrc(${i},'down',this)">👎</button>
+        <span class="fb-thanks">✓</span>
+      </span>`;
 
       const uid = `src-${Math.random().toString(36).slice(2,8)}`;
       if (s.type === 'ticket') {
@@ -340,8 +385,9 @@ async function doAsk() {
           <div class="source-header">
             <a href="${s.url}" target="_blank">${escHtml(s.key)}</a>
             <span class="source-summary">${escHtml(s.summary)}</span>
-            ${badge}
+            ${badge}${fbTag}
             ${hasDesc ? `<button class="expand-btn" onclick="toggleDesc('${uid}',this)">▼ Details</button>` : ''}
+            ${fbBtns}
           </div>
           ${descHtml}
           <div class="source-assignee">👤 ${escHtml(s.author || s.assignee)}</div>
@@ -349,13 +395,48 @@ async function doAsk() {
         </div>`;
       }
       return `<div class="source-item ${isStrong ? 'source-strong' : ''}">
-        📄 ${escHtml(s.filename)} ${badge}
+        <div class="source-header">
+          📄 ${escHtml(s.filename)} ${badge}${fbTag}
+          ${fbBtns}
+        </div>
         <div class="source-comment">${escHtml(s.comment)}</div>
       </div>`;
     }).join('');
     showEl('sources-box');
   }
 }
+
+// ── Feedback (👍/👎 → server-side re-ranking signal) ─────────────────────────
+function resetFeedbackGroup(group) {
+  if (!group) return;
+  group.classList.remove('fb-done');
+  group.querySelectorAll('.fb-btn').forEach(b => { b.disabled = false; b.classList.remove('voted'); });
+}
+
+function markVoted(group, vote) {
+  if (!group) return;
+  group.querySelectorAll('.fb-btn').forEach(b => b.disabled = true);
+  const sel = group.querySelector(vote === 'up' ? '.fb-up' : '.fb-down');
+  if (sel) sel.classList.add('voted');
+  group.classList.add('fb-done');
+}
+
+async function sendFeedback(item, vote, group) {
+  if (!item) return;
+  const r = await post('/api/feedback', {
+    vote,
+    kind:      item.type || 'ticket',
+    key:       item.key || item.filename || '',
+    step:      _queryStep,
+    error:     _queryError,
+    query_raw: _queryRaw,
+  });
+  if (r.ok) markVoted(group, vote);
+  else alert('Could not save feedback: ' + (r.detail || r.error || 'unknown error'));
+}
+
+function sendFeedbackMain(vote, btn) { sendFeedback(_topMatch, vote, btn.parentElement); }
+function sendFeedbackSrc(i, vote, btn) { sendFeedback(_sources[i], vote, btn.parentElement); }
 
 async function uploadAttachment(input) {
   const file = input.files[0]; if (!file) return;

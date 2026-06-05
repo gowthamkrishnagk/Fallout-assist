@@ -10,7 +10,15 @@
     "score_threshold": 0.7,
     "llm_rerank": true,
     "index_path": "trackers/workaround_index",
-    "docs_path": "trackers/workaround_docs"
+    "docs_path": "trackers/workaround_docs",
+    "feedback_path": "trackers/feedback.json",
+    "feedback_weight": 0.15,
+    "feedback_curate_min": 3,
+    "jira_suggest_enabled": false,
+    "jira_suggest_dry_run": true,
+    "jira_suggest_minutes": 15,
+    "jira_suggest_jql": "project = SAC AND status in (\"Waiting for support\",\"in progress\") and \"Reporting Area[Dropdown]\" = \"Order Fallout\"",
+    "public_base_url": "http://10.169.101.69:8010"
   },
   "llm": {
     "provider": "groq",

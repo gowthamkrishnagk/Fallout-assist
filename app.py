@@ -107,10 +107,48 @@ def _auto_ingest_loop():
             _release()
 
 
+# ── Background Jira auto-suggest poller ──────────────────────────────────────
+# Periodically scans inflow Order Fallout tickets and posts a suggested workaround
+# (or, in dry-run, logs what it would post). Config is re-read every minute, so
+# enabling/disabling or changing the cadence takes effect within ~1 min. Skips a
+# tick while an ingest is running (the index is in flux).
+
+def _jira_suggest_loop():
+    import jirabot
+    elapsed = 0
+    while True:
+        time.sleep(60)
+        try:
+            cfg = load_config()
+            wf  = cfg["workaround_finder"]
+            enabled  = bool(wf.get("jira_suggest_enabled", False))
+            interval = int(wf.get("jira_suggest_minutes", 0) or 0)
+        except Exception as e:
+            print(f"[JIRA-SUGGEST] config read failed: {e}")
+            continue
+        if not enabled or interval <= 0:
+            elapsed = 0
+            continue
+        elapsed += 1
+        if elapsed < interval:
+            continue
+        elapsed = 0
+
+        if _running:        # an ingest is in progress — index in flux, skip this tick
+            print("[JIRA-SUGGEST] skipped — an ingest is running")
+            continue
+        try:
+            jirabot.run_once(cfg)
+        except Exception as e:
+            print(f"[JIRA-SUGGEST] EXCEPTION: {e}")
+
+
 @app.on_event("startup")
 def _start_auto_ingest():
     threading.Thread(target=_auto_ingest_loop, daemon=True).start()
     print("[AUTO-INGEST] scheduler started (interval read live from config)")
+    threading.Thread(target=_jira_suggest_loop, daemon=True).start()
+    print("[JIRA-SUGGEST] scheduler started (interval read live from config)")
 
 
 # ── Pages ─────────────────────────────────────────────────────────────────────
@@ -212,9 +250,8 @@ def ingest_schedule_set(body: dict):
 
 @app.post("/api/ask")
 async def ask(body: dict):
-    import search as s
-    import generate as g
     import ingest as ing
+    import suggest
 
     ticket_id  = body.get("ticket_id", "").strip().upper()
     query_text = body.get("query_text", "").strip()
@@ -241,84 +278,120 @@ async def ask(body: dict):
                 msg = f"Could not fetch ticket {ticket_id} from Jira (HTTP {code or 'error'})."
             raise HTTPException(400, msg)
 
-    result = s.find_workarounds(query_text, cfg)
-    strong  = result["strong"]
-    context = result["context"]
-    threshold  = result["threshold"]
-    best_score = result["best_score"]
+    # Build the suggestion (retrieval + grounded synthesis). Shared verbatim with
+    # the Jira auto-suggest bot so a posted comment matches the in-app answer.
+    out = suggest.suggest_for_query(query_text, cfg)
+    out.pop("top", None)            # internal handle — not part of the API response
+    return out
 
-    # Nothing matched. Either the KB is empty, or no ticket matches this error
-    # (a step-only match with a different error is dropped, not shown as a lead).
-    if not strong and not context:
-        empty  = ing.get_status(cfg).get("total_chunks", 0) == 0
-        answer = ("No tickets are indexed yet — ingest first."
-                  if empty else
-                  "No past resolution matches this failure. No ticket has this "
-                  "error, so there's no workaround to suggest (a different error on "
-                  "the same step is treated as a different problem).")
-        return {"ok": True, "mode": "no_data", "answer": answer,
-                "strong": [], "context": [], "best_score": 0}
 
-    wf         = cfg["workaround_finder"]
-    llm_on     = wf.get("llm_enabled", True)            # master LLM switch
-    synthesize = llm_on and wf.get("llm_synthesize", True)
-    llm_note   = ""
+# ── Feedback (👍/👎 → re-ranking signal) ───────────────────────────────────────
 
-    # Strong match(es) found — produce a grounded `=== FIX ===` recommendation.
-    if strong:
-        top_body = strong[0]["comment"]
-        # Hybrid: if the LLM is disabled, or the best source is ALREADY a clean
-        # === FIX === block, show it verbatim — no generation.
-        if not synthesize or "=== fix ===" in top_body.lower():
-            answer, provider, model = top_body, "direct_match", ""
-        else:
-            # Legacy / multiple comments → LLM synthesizes into the FIX format,
-            # grounded in sources only. On decline (NO_RELIABLE_WORKAROUND), empty
-            # output, a local-model answer, or any error → fall back to the raw
-            # best comment, never invent.
-            try:
-                prompt = s.build_prompt(query_text, result)
-                gen    = g.generate(prompt, cfg["llm"], job="synthesis")
-                ans    = (gen.get("answer") or "").strip()
-                if gen.get("provider") == "local":
-                    print("[LLM] synthesis answered by local model — distrust, verbatim")
-                    answer, provider, model = top_body, "direct_match", ""
-                elif s.NO_FIX_SENTINEL in ans or len(ans) < 10:
-                    print("[LLM] declined / empty — showing raw best comment")
-                    answer, provider, model = top_body, "direct_match", ""
-                else:
-                    answer, provider, model = ans, gen["provider"], gen["model"]
-            except Exception as llm_err:
-                # All cloud providers failed — show the raw comment and tell the
-                # user why, instead of silently dropping to a local model.
-                reason   = str(llm_err)[:160]
-                llm_note = f"LLM unavailable, showing the raw matched comment: {reason}"
-                print(f"[LLM] synthesis failed, verbatim fallback — {reason}")
-                answer, provider, model = top_body, "direct_match", ""
-        mode = "strong_match"
+@app.post("/api/feedback")
+def feedback_record(body: dict):
+    """Record a 👍 (correct) / 👎 (wrong) vote on a suggested workaround. Scoped to
+    (workaround identity, failure) so it trains ranking for that step+error only.
+    Pure runtime signal — does not touch the index, so no re-ingest is needed."""
+    import feedback as fb
+    vote = body.get("vote", "")
+    key  = (body.get("key", "") or "").strip()
+    if vote not in ("up", "down"):
+        raise HTTPException(400, "vote must be 'up' or 'down'")
+    if not key:
+        raise HTTPException(400, "key required (ticket key or document filename)")
+    cfg = load_config()
+    rec = fb.record(
+        vote=vote,
+        kind=body.get("kind", "ticket"),
+        key=key,
+        step=body.get("step", ""),
+        error=body.get("error", ""),
+        query_raw=body.get("query_raw", ""),
+        cfg=cfg,
+    )
+    return {"ok": True, "vote": rec["vote"]}
 
-    else:
-        # No strong match — abstain from synthesis (the sources are below the
-        # relevance bar; generating from them is where hallucination happens).
-        # Show the nearest weak match's actual comment as a lead instead.
-        top      = context[0] if context else None
-        answer   = top["comment"] if top else "No similar tickets found."
-        provider = "direct_match"
-        model    = ""
-        mode     = "low_confidence"
 
-    return {
-        "ok":        True,
-        "mode":      mode,          # strong_match | low_confidence | no_data
-        "answer":    answer,
-        "provider":  provider,
-        "model":     model,
-        "llm_note":  llm_note,      # set when cloud LLM failed (verbatim fallback)
-        "threshold": threshold,
-        "best_score": best_score,
-        "strong":    strong,        # comments scoring >= threshold
-        "context":   context,       # weaker matches shown as reference
-    }
+# ── Jira auto-suggest: feedback links + poller ────────────────────────────────
+
+def _fb_page(title: str, body_html: str, tone: str = "ok") -> HTMLResponse:
+    """Minimal self-contained page shown after a 👍/👎 link is clicked from Jira."""
+    color = {"ok": "#22c55e", "warn": "#eab308", "err": "#ef4444"}.get(tone, "#22c55e")
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FalloutAssist feedback</title>
+<style>
+  body {{ background:#0f172a; color:#e2e8f0; font-family:system-ui,Segoe UI,sans-serif;
+          display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; }}
+  .card {{ background:#1e293b; border:1px solid #334155; border-left:4px solid {color};
+           border-radius:12px; padding:28px 32px; max-width:560px; }}
+  h1 {{ font-size:18px; margin:0 0 12px; color:#f8fafc; }}
+  p {{ line-height:1.6; color:#cbd5e1; }}
+  pre {{ background:#0f172a; border:1px solid #334155; border-radius:8px; padding:12px;
+         white-space:pre-wrap; color:#e2e8f0; font-size:13px; }}
+  a.btn {{ display:inline-block; margin-top:14px; background:#ef4444; color:#fff;
+           text-decoration:none; padding:10px 18px; border-radius:8px; font-weight:600; }}
+  .muted {{ color:#64748b; font-size:12px; margin-top:16px; }}
+</style></head><body><div class="card">
+<h1>{title}</h1>{body_html}
+<div class="muted">FalloutAssist · you can close this tab.</div>
+</div></body></html>"""
+    return HTMLResponse(html)
+
+
+@app.get("/api/jira-feedback", response_class=HTMLResponse)
+def jira_feedback(key: str = "", cand: str = "", action: str = "",
+                  sig: str = "", confirm: int = 0):
+    """Feedback links embedded in Jira comments land here.
+      action=up                → confirm the workaround (boost), keep the comment.
+      action=down (no confirm) → show a confirmation page (guards against link-prefetch).
+      action=down&confirm=1    → demote + re-match + update the comment in place."""
+    import jirabot
+    key, cand, action = key.strip(), cand.strip(), action.strip()
+    if action not in ("up", "down") or not key or not cand:
+        return _fb_page("Invalid link", "<p>This feedback link is malformed.</p>", "err")
+    if not jirabot.verify(key, cand, action, sig):
+        return _fb_page("Invalid or expired link",
+                        "<p>This feedback link could not be verified.</p>", "err")
+
+    cfg = load_config()
+
+    if action == "up":
+        jirabot.apply_vote(key, cand, "up", cfg)
+        return _fb_page("👍 Thanks — confirmed",
+                        f"<p>Marked the workaround on <b>{key}</b> as a good fix. "
+                        "It'll be favoured for similar failures from now on.</p>", "ok")
+
+    # action == "down"
+    if not confirm:
+        # Confirmation step — a bare GET (email/link previewers) must not trigger an edit.
+        url = (f"/api/jira-feedback?key={key}&cand={cand}&action=down"
+               f"&sig={sig}&confirm=1")
+        return _fb_page(
+            "👎 Improve this suggestion?",
+            f"<p>This will mark the current workaround on <b>{key}</b> as not right, "
+            "and replace the comment with the next-best matched workaround.</p>"
+            f'<a class="btn" href="{url}">Confirm &amp; improve</a>', "warn")
+
+    out = jirabot.apply_vote(key, cand, "down", cfg)
+    if out.get("improved"):
+        return _fb_page("👎 Updated with a better match",
+                        "<p>Thanks — the comment on <b>{0}</b> was replaced with the "
+                        "next-best matched workaround:</p><pre>{1}</pre>".format(
+                            key, _esc(out.get("answer", ""))), "ok")
+    return _fb_page("👎 Noted — needs manual review",
+                    f"<p>No further confident workaround was found for <b>{key}</b>. "
+                    "It's been flagged for manual review.</p>", "warn")
+
+
+def _esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+@app.get("/api/jira-suggest/status")
+def jira_suggest_status():
+    import jirabot
+    return jirabot.get_status(load_config())
 
 
 # ── Documents ─────────────────────────────────────────────────────────────────
