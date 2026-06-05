@@ -122,7 +122,7 @@ def _jira_suggest_loop():
             cfg = load_config()
             wf  = cfg["workaround_finder"]
             enabled  = bool(wf.get("jira_suggest_enabled", False))
-            interval = int(wf.get("jira_suggest_minutes", 0) or 0)
+            interval = int(wf.get("jira_suggest_minutes", 1) or 0)
         except Exception as e:
             print(f"[JIRA-SUGGEST] config read failed: {e}")
             continue

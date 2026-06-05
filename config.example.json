@@ -16,7 +16,7 @@
     "feedback_curate_min": 3,
     "jira_suggest_enabled": false,
     "jira_suggest_dry_run": true,
-    "jira_suggest_minutes": 15,
+    "jira_suggest_minutes": 1,
     "jira_suggest_jql": "project = SAC AND status in (\"Waiting for support\",\"in progress\") and \"Reporting Area[Dropdown]\" = \"Order Fallout\"",
     "public_base_url": "http://10.169.101.69:8010"
   },

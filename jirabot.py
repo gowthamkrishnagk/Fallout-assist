@@ -68,7 +68,7 @@ def get_status(cfg: dict) -> dict:
     return {
         "enabled":         bool(wf.get("jira_suggest_enabled", False)),
         "dry_run":         bool(wf.get("jira_suggest_dry_run", True)),
-        "minutes":         int(wf.get("jira_suggest_minutes", 0) or 0),
+        "minutes":         int(wf.get("jira_suggest_minutes", 1) or 0),
         "jql":             wf.get("jira_suggest_jql", ""),
         "public_base_url": wf.get("public_base_url", ""),
         "tracked":         len(state),
