@@ -547,7 +547,10 @@ async function loadJiraSuggest() {
   document.getElementById('js-live').checked      = !r.dry_run;        // live = NOT dry-run
   document.getElementById('js-jql').value         = r.jql || '';
   document.getElementById('js-minutes').value     = String(r.minutes ?? 0);
-  document.getElementById('js-base-url').value    = r.public_base_url || '';
+  // Pre-fill the base URL with the address you're viewing the app at (the link
+  // target users need) so you usually never have to type it. Still editable for
+  // edge cases (reverse proxy / different external hostname).
+  document.getElementById('js-base-url').value    = r.public_base_url || window.location.origin;
   renderJiraSuggestStatus(r);
 }
 
