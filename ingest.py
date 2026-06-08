@@ -42,12 +42,15 @@ def _get_jira(cfg: dict):
     return JIRA(server=url, basic_auth=(email, api_token))
 
 
-def _search_jql(jira, jql: str, fields: str, max_issues=None) -> list:
+def _search_jql(jira, jql: str, fields: str, max_issues=None, expand=None) -> list:
     """Atlassian removed the old GET /rest/api/{2,3}/search (HTTP 410, CHANGE-2046).
     This uses the replacement cursor-paginated /rest/api/2/search/jql endpoint and
     wraps the raw results as jira Issue objects, so all downstream code is unchanged.
     The /2/ base is deliberate: it keeps description/comment as plain text (the /3/
     endpoint returns Atlassian Document Format JSON, which would break text parsing).
+
+    Pass expand="changelog" to include each issue's change history (needed to find
+    when/who resolved the ticket — see _resolution_event).
 
     Pagination is by opaque nextPageToken (there is no startAt/total anymore)."""
     from jira.resources import Issue
@@ -57,6 +60,8 @@ def _search_jql(jira, jql: str, fields: str, max_issues=None) -> list:
     token  = None
     while True:
         params = {"jql": jql, "maxResults": 100, "fields": fields}
+        if expand:
+            params["expand"] = expand
         if token:
             params["nextPageToken"] = token
         resp = jira._session.get(url, params=params)
@@ -176,10 +181,71 @@ def _extract_error_context(issue) -> str:
     return ""
 
 
-def _get_assignee_comments(issue) -> list[dict]:
-    """Return assignee's substantive comments as individual dicts.
-    Bots (SAC BOT, Automation for Jira) are excluded from both primary and fallback.
-    Falls back to last 3 substantive human comments if assignee left none."""
+# Statuses that mean the ticket reached a resolved/terminal state.
+_RESOLVED_STATUSES = {"resolved", "closed", "done", "cancelled", "canceled",
+                      "complete", "completed"}
+
+# How close (seconds) a comment must be to the resolution event to count as the
+# resolution comment. The user's observation: the real fix is commented within a
+# couple of minutes of the ticket being resolved.
+_RESOLUTION_WINDOW_SECONDS = 120  # ±2 min
+
+
+def _resolution_event(issue):
+    """From the issue changelog, find WHEN the ticket was resolved and WHO did it.
+
+    Looks for the most recent history entry that either sets a non-empty resolution
+    or moves status into a terminal state (_RESOLVED_STATUSES). Taking the *most
+    recent* such transition handles reopen→reclose correctly.
+
+    Returns (epoch_seconds, resolver_display_name), or (None, None) when there's no
+    changelog (e.g. it wasn't expanded) or no resolving transition."""
+    changelog = getattr(issue, "changelog", None)
+    histories = getattr(changelog, "histories", None) if changelog else None
+    if not histories:
+        return None, None
+
+    best_epoch = None
+    best_author = None
+    for h in histories:
+        items = getattr(h, "items", []) or []
+        resolved_here = False
+        for it in items:
+            field  = (getattr(it, "field", "") or "").lower()
+            to_str = (getattr(it, "toString", "") or "").strip()
+            if field == "resolution" and to_str:
+                resolved_here = True
+                break
+            if field == "status" and to_str.lower() in _RESOLVED_STATUSES:
+                resolved_here = True
+                break
+        if not resolved_here:
+            continue
+        ep = _to_epoch(getattr(h, "created", "") or "")
+        if best_epoch is None or ep >= best_epoch:
+            best_epoch  = ep
+            author      = getattr(h, "author", None)
+            best_author = getattr(author, "displayName", None)
+    return best_epoch, best_author
+
+
+def _get_resolution_comments(issue) -> list[dict]:
+    """Return the ticket's actual resolution comment(s), anchored to the moment the
+    ticket was resolved — not the *current* assignee (which may have changed after
+    closure, so the real resolver's comment would otherwise be missed).
+
+    Strategy:
+      1. _resolution_event → when the ticket was resolved and who did it.
+      2. Among substantive human (non-bot) comments, prefer the resolver's. Take
+         those within ±2 min of the resolution event; if none fall in the window,
+         take the single comment closest in time to the event. If the resolver left
+         no comment (e.g. an automation flipped the status), consider all humans.
+      3. No changelog/resolution signal → fall back to the last substantive human
+         comment.
+
+    Pointer comments ('duplicate, refer to SAC-x') are KEPT — at search time the
+    follow-reference logic resolves them to the referenced ticket's real fix.
+    When a comment carries a === FIX === block, only that block is stored."""
     comments      = issue.fields.comment.comments if issue.fields.comment else []
     assignee      = getattr(issue.fields, "assignee", None)
     assignee_id   = getattr(assignee, "accountId", None)
@@ -192,25 +258,38 @@ def _get_assignee_comments(issue) -> list[dict]:
             return True
         return False
 
-    # All substantive human comments (bots excluded). Pointer comments
-    # ("duplicate, refer to SAC-x") are KEPT here on purpose — they carry the error
-    # signal, and at search time the follow-reference logic resolves them to the
-    # referenced ticket's real fix (from the index or a live Jira fetch). Dropping
-    # them here would prevent that. When a comment carries a === FIX === block,
-    # store only that block as the resolution.
     human = [
         {"author": c.author.displayName,
          "body": extract_fix_block(_clean(c.body)),
+         "epoch": _to_epoch(getattr(c, "created", "") or ""),
          "is_assignee": _is_assignee(c)}
         for c in comments
         if c.body and len(c.body.strip()) > 40
         and not _is_bot(c.author.displayName)
     ]
+    if not human:
+        return []
 
-    assignee_only = [c for c in human if c["is_assignee"]]
+    event_epoch, event_author = _resolution_event(issue)
 
-    # Fallback: no assignee comments — use last 3 substantive human comments
-    return assignee_only if assignee_only else human[-3:]
+    if event_epoch:
+        # Prefer whoever actually resolved the ticket; if they left no comment,
+        # fall back to any human comment near the resolution.
+        resolver   = [c for c in human if event_author and c["author"] == event_author]
+        candidates = resolver if resolver else human
+
+        within = [c for c in candidates
+                  if abs(c["epoch"] - event_epoch) <= _RESOLUTION_WINDOW_SECONDS]
+        if within:
+            within.sort(key=lambda c: c["epoch"])
+            return within
+
+        # Nothing inside the window → nearest comment in time to the resolution.
+        nearest = min(candidates, key=lambda c: abs(c["epoch"] - event_epoch))
+        return [nearest]
+
+    # No changelog / resolution transition — last substantive human comment.
+    return human[-1:]
 
 
 def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
@@ -243,7 +322,8 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
         try:
             jira   = _get_jira(cfg)
             issues = _search_jql(jira, jql,
-                                 "summary,description,status,comment,resolution,assignee,updated")
+                                 "summary,description,status,comment,resolution,assignee,updated",
+                                 expand="changelog")
             total  = len(issues)
             if progress_cb:
                 progress_cb(f"Fetched {total} tickets from Jira")
@@ -301,7 +381,7 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                 assignee_name = getattr(assignee, "displayName", "") or ""
                 summary       = issue.fields.summary
                 url           = f"{jira.server_url}/browse/{issue.key}"
-                comments      = _get_assignee_comments(issue)
+                comments      = _get_resolution_comments(issue)
 
                 # Record the timestamp regardless, so a ticket without a usable
                 # resolution comment isn't re-fetched and re-skipped every run.
@@ -628,18 +708,19 @@ _resolution_cache: dict = {}
 def fetch_ticket_resolution(ticket_id: str, cfg: dict) -> dict:
     """Live-fetch a ticket from Jira and return its best resolution comment, to
     follow a 'duplicate, refer to SAC-x' pointer to the real fix when SAC-x isn't
-    indexed. Bots and pointer comments are already excluded by
-    _get_assignee_comments. Returns {key, url, comment, author} or {} if the ticket
+    indexed. Bots are excluded and the comment is anchored to the resolution event by
+    _get_resolution_comments. Returns {key, url, comment, author} or {} if the ticket
     can't be fetched, has no usable resolution, or is itself a pointer."""
     if ticket_id in _resolution_cache:
         return _resolution_cache[ticket_id]
     try:
         jira     = _get_jira(cfg)
-        issue    = jira.issue(ticket_id, fields="summary,comment,assignee")
-        comments = _get_assignee_comments(issue)
+        issue    = jira.issue(ticket_id, fields="summary,comment,assignee",
+                              expand="changelog")
+        comments = _get_resolution_comments(issue)
         if not comments:
             return {}
-        c      = comments[-1]   # most recent substantive (non-bot, non-pointer) comment
+        c      = comments[-1]   # the resolution comment (latest within the window)
         result = {
             "key":     issue.key,
             "url":     f"{jira.server_url}/browse/{issue.key}",
