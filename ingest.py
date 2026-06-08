@@ -230,18 +230,20 @@ def _resolution_event(issue):
 
 
 def _get_resolution_comments(issue) -> list[dict]:
-    """Return the ticket's actual resolution comment(s), anchored to the moment the
-    ticket was resolved — not the *current* assignee (which may have changed after
-    closure, so the real resolver's comment would otherwise be missed).
+    """Return the ticket's actual resolution comment(s) — the work done by the
+    ticket's ASSIGNEE, anchored to the moment the ticket was resolved.
+
+    Why assignee-first: a lead often flips the status to Resolved and leaves only a
+    meta-note ("This ticket is worked by <name>, the actual shift assignee"), so the
+    changelog *resolver* is NOT a reliable source of the real fix. The engineer the
+    ticket is assigned to is the one who worked it, so their own comment is the fix.
 
     Strategy:
-      1. _resolution_event → when the ticket was resolved and who did it.
-      2. Among substantive human (non-bot) comments, prefer the resolver's. Take
-         those within ±2 min of the resolution event; if none fall in the window,
-         take the single comment closest in time to the event. If the resolver left
-         no comment (e.g. an automation flipped the status), consider all humans.
-      3. No changelog/resolution signal → fall back to the last substantive human
-         comment.
+      1. _resolution_event → when the ticket was resolved (and who flipped it).
+      2. Prefer the ASSIGNEE's substantive comments, anchored to the resolution:
+         those within ±2 min of the event, else the single one closest to it.
+      3. If the assignee left no comment, fall back to the resolver's comment(s),
+         then to any human — same anchoring. No changelog → last human comment.
 
     Pointer comments ('duplicate, refer to SAC-x') are KEPT — at search time the
     follow-reference logic resolves them to the referenced ticket's real fix.
@@ -272,24 +274,31 @@ def _get_resolution_comments(issue) -> list[dict]:
 
     event_epoch, event_author = _resolution_event(issue)
 
-    if event_epoch:
-        # Prefer whoever actually resolved the ticket; if they left no comment,
-        # fall back to any human comment near the resolution.
-        resolver   = [c for c in human if event_author and c["author"] == event_author]
-        candidates = resolver if resolver else human
+    def _anchor(cands: list) -> list:
+        """Comment(s) from `cands` tied to the resolution moment: those within the
+        ±window, else the single one closest to it; with no event, the last one."""
+        if not cands:
+            return []
+        if event_epoch:
+            within = [c for c in cands
+                      if abs(c["epoch"] - event_epoch) <= _RESOLUTION_WINDOW_SECONDS]
+            if within:
+                within.sort(key=lambda c: c["epoch"])
+                return within
+            return [min(cands, key=lambda c: abs(c["epoch"] - event_epoch))]
+        return cands[-1:]
 
-        within = [c for c in candidates
-                  if abs(c["epoch"] - event_epoch) <= _RESOLUTION_WINDOW_SECONDS]
-        if within:
-            within.sort(key=lambda c: c["epoch"])
-            return within
+    # Prefer the ASSIGNEE — the engineer who actually worked the ticket. A lead may
+    # have flipped the status and left only a meta-note ("worked by <assignee>"), so
+    # the changelog resolver is not a reliable source; the assignee's own comment is.
+    assignee_cmts = [c for c in human if c["is_assignee"]]
+    if assignee_cmts:
+        return _anchor(assignee_cmts)
 
-        # Nothing inside the window → nearest comment in time to the resolution.
-        nearest = min(candidates, key=lambda c: abs(c["epoch"] - event_epoch))
-        return [nearest]
-
-    # No changelog / resolution transition — last substantive human comment.
-    return human[-1:]
+    # Assignee left no substantive comment → fall back to whoever resolved it, then
+    # to any human, anchored to the resolution moment.
+    resolver = [c for c in human if event_author and c["author"] == event_author]
+    return _anchor(resolver if resolver else human)
 
 
 def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
