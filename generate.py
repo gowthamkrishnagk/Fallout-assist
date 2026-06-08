@@ -147,6 +147,44 @@ DEFAULT_MODELS = {
 }
 
 
+class LLMRetryable(Exception):
+    """A transient LLM failure — a service-capacity 429 ('high traffic'), a 5xx, or
+    a network timeout — that is worth retrying after a short backoff, as opposed to
+    a hard error (bad key/model/quota) that won't change on retry."""
+
+
+# 429 bodies that mean "the SERVICE is momentarily busy", not "THIS key is out of
+# quota". A short retry clears these; cooling the key would needlessly bench it.
+_TRANSIENT_429 = ("high traffic", "try again", "overloaded", "temporarily",
+                  "capacity", "please retry", "service unavailable", "is busy")
+
+
+def _is_transient_429(reason: str) -> bool:
+    r = (reason or "").lower()
+    return any(t in r for t in _TRANSIENT_429)
+
+
+def _err_reason(resp: httpx.Response) -> str:
+    """Extract the human error message from a provider's error response. Providers
+    shape errors differently: OpenAI/Groq use {"error":{"message":...}}, Cerebras/
+    NVIDIA use {"detail":...} or {"message":...}. Try all so it's never lost."""
+    try:
+        j   = resp.json()
+        err = j.get("error")
+        return ((err.get("message") if isinstance(err, dict) else err)
+                or j.get("detail") or j.get("message") or "")
+    except Exception:
+        return resp.text[:200]
+
+
+def _is_retryable(e: Exception) -> bool:
+    """True for transient failures worth an in-request retry: our LLMRetryable plus
+    raw httpx transport errors (timeout / connection reset) from a cold or flaky
+    network path."""
+    return isinstance(e, (LLMRetryable, httpx.TimeoutException, httpx.ConnectError,
+                          httpx.ReadError, httpx.RemoteProtocolError))
+
+
 def _generate_one(prompt: str, provider: str, model: str, cfg: dict) -> dict:
     model = model or DEFAULT_MODELS.get(provider, "")
     if provider == "local":
@@ -183,6 +221,12 @@ def generate(prompt: str, cfg: dict, job: str | None = None) -> dict:
     own provider/model (see _resolve_job) so quota spreads across providers. The
     fallback chain still applies, so a job's provider 429 rolls onward as usual.
 
+    Transient failures (a 'high traffic' capacity 429, a 5xx, or a network timeout)
+    are retried IN-REQUEST after a short backoff — up to cfg["max_retries"] extra
+    passes over the whole provider order (default 2) — so a brief provider blip is
+    absorbed here instead of surfacing as "LLM unavailable" and forcing the user to
+    click search again. A hard error (bad key/model, real quota) is not retried.
+
     Returns {"answer", "provider", "model"} — provider/model reflect whoever
     actually answered, so the UI shows which one was used. Raises only if ALL fail.
     cfg = config["llm"]"""
@@ -192,27 +236,43 @@ def generate(prompt: str, cfg: dict, job: str | None = None) -> dict:
     # Never auto-fall to the local model: a weak local model ignores grounding and
     # hallucinates. `local` is used ONLY when it is the explicitly selected primary.
     order    = [primary] + [p for p in fallback if p != primary and p != "local"]
+    max_retries = int(cfg.get("max_retries", 2))
 
-    errors = []
-    for i, prov in enumerate(order):
+    def _model_for(prov: str) -> str:
         if prov == primary:
-            model = job_model or (cfg.get("model") if not job_prov else None) \
-                    or DEFAULT_MODELS.get(prov)
-        else:
-            model = (cfg.get("fallback_models", {}) or {}).get(prov) or DEFAULT_MODELS.get(prov)
-        try:
-            result = _generate_one(prompt, prov, model, cfg)
-            if i > 0:
-                print(f"[LLM] failover -> answered by '{prov}' "
-                      f"(after {', '.join(order[:i])} failed)")
-            return result
-        except Exception as e:
-            msg = _redact(e)[:120]
-            errors.append(f"{prov}: {msg}")
-            nxt = f" -- trying {order[i+1]}" if i < len(order) - 1 else ""
-            print(f"[LLM] provider '{prov}' failed ({msg}){nxt}")
+            return job_model or (cfg.get("model") if not job_prov else None) \
+                   or DEFAULT_MODELS.get(prov)
+        return (cfg.get("fallback_models", {}) or {}).get(prov) or DEFAULT_MODELS.get(prov)
 
-    raise ValueError("All LLM providers failed: " + " | ".join(errors))
+    last_errors: list = []
+    for attempt in range(max_retries + 1):
+        errors, retryable = [], False
+        for i, prov in enumerate(order):
+            try:
+                result = _generate_one(prompt, prov, _model_for(prov), cfg)
+                if i > 0 or attempt > 0:
+                    where = (f" (after {', '.join(order[:i])} failed)" if i else "")
+                    when  = (f" on retry {attempt}" if attempt else "")
+                    print(f"[LLM] answered by '{prov}'{where}{when}")
+                return result
+            except Exception as e:
+                msg = _redact(e)[:120]
+                errors.append(f"{prov}: {msg}")
+                retryable = retryable or _is_retryable(e)
+                nxt = f" -- trying {order[i+1]}" if i < len(order) - 1 else ""
+                print(f"[LLM] provider '{prov}' failed ({msg}){nxt}")
+        last_errors = errors
+        # Only retry the whole order when at least one failure was transient — a
+        # hard error (bad key/model, real quota) won't change on a retry.
+        if retryable and attempt < max_retries:
+            backoff = 1.5 * (attempt + 1)
+            print(f"[LLM] transient failure — retrying in {backoff:.1f}s "
+                  f"(attempt {attempt + 2}/{max_retries + 1})")
+            time.sleep(backoff)
+            continue
+        break
+
+    raise ValueError("All LLM providers failed: " + " | ".join(last_errors))
 
 
 def _local(prompt: str, model: str, ollama_url: str) -> dict:
@@ -250,7 +310,7 @@ def _openai_chat(prompt: str, model: str, provider: str) -> dict:
     if not keys:
         raise ValueError(f"{spec['key']} not set in .env")
 
-    rate_limited = []
+    rate_limited, any_transient = [], False
     for api_key in keys:
         resp = httpx.post(
             spec["url"],
@@ -263,29 +323,30 @@ def _openai_chat(prompt: str, model: str, provider: str) -> dict:
         if provider == "groq":
             _capture_groq_quota(resp, _key_fp(api_key), api_key[-4:])   # quota even on 429
         if resp.status_code == 429:
-            _cool_key(provider, api_key, resp)
-            rate_limited.append(f"…{api_key[-4:]}")
+            reason    = _err_reason(resp)
+            transient = _is_transient_429(reason)   # service busy, not a key quota
+            if not transient:
+                _cool_key(provider, api_key, resp)  # real per-key RPM/TPM limit
+            any_transient = any_transient or transient
+            rate_limited.append(f"…{api_key[-4:]}{' (busy)' if transient else ''}")
             if len(keys) > 1:
-                print(f"[LLM] {provider} key …{api_key[-4:]} rate-limited — rotating to next key")
+                kind = "busy" if transient else "rate-limited"
+                print(f"[LLM] {provider} key …{api_key[-4:]} {kind} — rotating to next key")
             continue
         if resp.status_code >= 400:
-            # Different providers shape errors differently: OpenAI/Groq use
-            # {"error":{"message":...}}, Cerebras/NVIDIA use {"detail":...} or
-            # {"message":...}. Try all so the real reason is never lost.
-            reason = ""
-            try:
-                j   = resp.json()
-                err = j.get("error")
-                reason = (err.get("message") if isinstance(err, dict) else err) \
-                         or j.get("detail") or j.get("message") or ""
-            except Exception:
-                reason = resp.text[:200]
-            raise ValueError(f"{provider} {resp.status_code}: {_redact(reason)}")
+            # Non-429 4xx/5xx is a hard error (bad model/key) — raise immediately
+            # so trying more keys doesn't mask the real reason. (5xx is wrapped as
+            # retryable so generate() can give it one more pass.)
+            reason = _err_reason(resp)
+            err = ValueError(f"{provider} {resp.status_code}: {_redact(reason)}")
+            raise LLMRetryable(str(err)) if resp.status_code >= 500 else err
         answer = resp.json()["choices"][0]["message"]["content"].strip()
         return {"answer": answer, "provider": provider, "model": model}
 
-    raise ValueError(f"{provider} 429: all {len(keys)} key(s) rate-limited "
-                     f"({', '.join(rate_limited)})")
+    msg = (f"{provider} 429: all {len(keys)} key(s) rate-limited "
+           f"({', '.join(rate_limited)})")
+    # If any failure was a transient capacity blip, let generate() retry the order.
+    raise LLMRetryable(msg) if any_transient else ValueError(msg)
 
 
 def _claude(prompt: str, model: str) -> dict:
@@ -296,7 +357,7 @@ def _claude(prompt: str, model: str) -> dict:
     if not keys:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
 
-    rate_limited = []
+    rate_limited, any_transient = [], False
     for api_key in keys:
         resp = httpx.post(
             "https://api.anthropic.com/v1/messages",
@@ -307,17 +368,25 @@ def _claude(prompt: str, model: str) -> dict:
             timeout=60,
         )
         if resp.status_code == 429:
-            _cool_key("claude", api_key, resp)
-            rate_limited.append(f"…{api_key[-4:]}")
+            reason    = _err_reason(resp)
+            transient = _is_transient_429(reason)
+            if not transient:
+                _cool_key("claude", api_key, resp)
+            any_transient = any_transient or transient
+            rate_limited.append(f"…{api_key[-4:]}{' (busy)' if transient else ''}")
             if len(keys) > 1:
-                print(f"[LLM] claude key …{api_key[-4:]} rate-limited — rotating to next key")
+                kind = "busy" if transient else "rate-limited"
+                print(f"[LLM] claude key …{api_key[-4:]} {kind} — rotating to next key")
             continue
+        if resp.status_code >= 500:
+            raise LLMRetryable(f"claude {resp.status_code}: {_redact(_err_reason(resp))}")
         resp.raise_for_status()
         answer = resp.json()["content"][0]["text"].strip()
         return {"answer": answer, "provider": "claude", "model": model}
 
-    raise ValueError(f"claude 429: all {len(keys)} key(s) rate-limited "
-                     f"({', '.join(rate_limited)})")
+    msg = (f"claude 429: all {len(keys)} key(s) rate-limited "
+           f"({', '.join(rate_limited)})")
+    raise LLMRetryable(msg) if any_transient else ValueError(msg)
 
 
 def available_local_models(ollama_url: str = "http://localhost:11434") -> list[dict]:
