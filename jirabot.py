@@ -78,22 +78,28 @@ def get_status(cfg: dict) -> dict:
 
 
 # Statuses that represent a real suggestion to show in the UI list.
-_PREVIEW_STATUSES = {"dry_run", "posted", "improved", "exhausted"}
+# llm_deferred = matched, but synthesis is waiting on the LLM rate limit to clear.
+_PREVIEW_STATUSES = {"dry_run", "posted", "improved", "exhausted", "llm_deferred"}
 
 
-def list_previews(cfg: dict) -> list:
+def list_previews(cfg: dict, today_only: bool = True) -> list:
     """The current suggestions across tracked tickets — drives the UI "Pending
-    suggestions" list so you don't have to grep the log. Built from the state file,
-    so it persists across runs (the dry-run dedup means a re-run shows 0 new, but
-    the suggestions themselves are still listed here)."""
+    suggestions" list so you don't have to grep the log.
+
+    today_only (default): show just TODAY's inflow suggestions, not the whole tracked
+    history. The state file still keeps every ticket (for idempotency / dedup), but
+    the panel only lists ones acted on today, matching how inflow is reviewed daily."""
     state    = _load_state()
     jira_url = (cfg.get("jira", {}).get("url", "") or "").rstrip("/")
+    today    = datetime.utcnow().date().isoformat()
     def browse(k):
         return f"{jira_url}/browse/{k}" if jira_url and k else ""
     out = []
     for key, st in state.items():
         status = st.get("status")
         if status not in _PREVIEW_STATUSES:
+            continue
+        if today_only and (st.get("updated", "")[:10] != today):
             continue
         matched = st.get("suggested_key") or ""
         out.append({
@@ -234,7 +240,7 @@ def run_once(cfg: dict) -> dict:
 
         state = _load_state()
         posted = improved_silent = skipped = 0
-        would  = 0
+        would  = deferred = 0
 
         for issue in issues:
             key = issue.key
@@ -269,6 +275,30 @@ def run_once(cfg: dict) -> dict:
                     or res.get("best_score", 0) < threshold:
                 improved_silent += 1
                 state[key] = {"key": key, "status": "no_match", "updated": _now()}
+                continue
+
+            # LLM rate-limited / unavailable: a strong match was found but synthesis
+            # failed because every provider errored (res["llm_note"] set). Don't post
+            # a raw fallback or mark the ticket done — show a "check the app" note and
+            # let the NEXT poll retry it automatically once the limit clears. Status
+            # stays llm_deferred (not dry_run/posted), so it isn't skipped next pass.
+            if res.get("llm_note"):
+                state[key] = {
+                    "key":           key,
+                    "status":        "llm_deferred",
+                    "suggested_key": (res.get("top") or {}).get("key", ""),
+                    "pct":           round(res.get("best_score", 0) * 100),
+                    "snippet":       ("⏳ LLM is rate-limited — workaround synthesis is pending. "
+                                      "Open the app and search this failure to see the workaround "
+                                      "now; auto-suggest will retry automatically once the limit "
+                                      "clears."),
+                    "summary":       (getattr(issue.fields, "summary", "") or "")[:140],
+                    "step":          res.get("query_step", ""),
+                    "error":         res.get("query_error", ""),
+                    "updated":       _now(),
+                }
+                deferred += 1
+                print(f"[JIRA-SUGGEST] {key}: LLM rate-limited — deferred, will retry next pass")
                 continue
 
             # Quality gate: the LLM judged the matched sources have no real workaround
@@ -319,7 +349,7 @@ def run_once(cfg: dict) -> dict:
 
     summary = {"ok": True, "scanned": len(issues), "posted": posted,
                "would_post": would, "silent": improved_silent, "skipped": skipped,
-               "dry_run": dry, "last_run": _now()}
+               "deferred": deferred, "dry_run": dry, "last_run": _now()}
     _save_meta(summary)
     print(f"[JIRA-SUGGEST] run done — {summary}")
     return summary

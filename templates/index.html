@@ -570,12 +570,13 @@ async function loadJiraSuggestPreviews() {
   try { r = await get('/api/jira-suggest/previews'); } catch (e) { el.innerHTML = ''; return; }
   const items = (r && r.previews) || [];
   if (!items.length) {
-    el.innerHTML = '<div class="muted" style="font-size:13px">No suggestions yet — run a scan to preview what would be posted.</div>';
+    el.innerHTML = '<div class="muted" style="font-size:13px">No suggestions for today yet — run a scan to preview today\'s inflow.</div>';
     return;
   }
-  const badgeText = { dry_run: 'would comment', posted: 'commented', improved: 'commented (improved)', exhausted: 'manual review' };
+  const badgeText = { dry_run: 'would comment', posted: 'commented', improved: 'commented (improved)',
+                      exhausted: 'manual review', llm_deferred: '⏳ LLM rate-limited — check app' };
   el.innerHTML =
-    `<div class="sources-header" style="margin-bottom:8px">Pending suggestions — ${items.length} ticket(s)</div>` +
+    `<div class="sources-header" style="margin-bottom:8px">Today's suggestions — ${items.length} ticket(s)</div>` +
     items.map(p => {
       const status = p.status || '';
       const badge  = badgeText[status] || status;
