@@ -100,11 +100,22 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     # doc only ranks high when its failed step / error match — not on shared prose.
     ticket_hits = vectordb.search_dual(step_emb, error_emb, top_k, index_path, err_weight, err_floor)
     doc_hits    = vectordb.search_docs_dual(step_emb, error_emb, max(2, top_k // 2), index_path, err_weight, err_floor)
+    all_hits    = ticket_hits + doc_hits
+
+    # Hybrid retrieval: fuse a BM25 keyword ranking with the vector ranking (RRF).
+    # Lifts exact-token matches (error codes, step names) that embeddings blur and
+    # pulls in keyword-only hits the vector pool missed — each scored with an honest
+    # cosine so the threshold/display stay truthful. LLM-free, so it costs no quota.
+    rrf = {}
+    if wf.get("hybrid_enabled", True):
+        rrf, all_hits = _hybrid_augment(step, error, step_emb, error_emb,
+                                        all_hits, index_path, wf, err_weight, err_floor)
 
     # Build a single cosine-sorted candidate list (dedup tickets, drop weak docs).
     candidates   = []
     seen_tickets = set()
-    for h in sorted(ticket_hits + doc_hits, key=lambda x: x["score"], reverse=True):
+    for h in sorted(all_hits, key=lambda x: x["score"], reverse=True):
+        h_id   = h.get("id")
         meta   = h["meta"]
         source = meta.get("source", "unknown")
         score  = h["score"]
@@ -149,6 +160,7 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
             seen_tickets.add(key)
             candidates.append({
                 "type":        "ticket",
+                "_id":         h_id,
                 "key":         key,
                 "summary":     meta.get("summary", ""),
                 "url":         url,
@@ -169,6 +181,7 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
                 continue
             candidates.append({
                 "type":     "doc",
+                "_id":      h_id,
                 "filename": meta.get("filename", ""),
                 "chunk":    meta.get("chunk", 0),
                 "comment":  h["doc"],
@@ -186,6 +199,13 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     # the UI's "% match" badge stays honest. Likes float a workaround up, dislikes
     # sink it (softly — it can drop below threshold but is never erased).
     _apply_feedback(step, error, candidates, cfg, threshold)
+
+    # Hybrid boost: lift candidates that also rank high on lexical (BM25) match, so
+    # an exact error-code / step-name hit the embedding buried floats up. Bounded
+    # (like feedback) so it nudges ordering and can cross the strong threshold for a
+    # near-miss, but can't manufacture a strong match from an unrelated ticket.
+    if rrf:
+        _apply_hybrid(candidates, rrf, wf)
 
     # Order matches of similar strength (same 0.01 score bucket — e.g. the many
     # tickets that tie at 1.0 for an identical error) by, in priority:
@@ -214,6 +234,52 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
         "query_step":  step,
         "query_error": error,
     }
+
+
+def _hybrid_augment(step: str, error: str, step_emb, error_emb, vector_hits: list,
+                    index_path: str, wf: dict, err_weight: float, err_floor: float):
+    """Run BM25 keyword search, fuse it with the vector hits (RRF), and pull in
+    keyword-only hits the vector pool missed — scoring them with the same dual
+    cosine so they're directly comparable to the vector candidates.
+
+    Returns (rrf_scores_by_id, augmented_hits). Best-effort: if the keyword index
+    is unavailable (rank-bm25 missing / empty KB) it returns ({}, vector_hits)."""
+    import retrieval
+    top_k   = wf.get("top_k", 10)
+    kw_hits = retrieval.keyword_search(step, error, max(top_k * 3, 30), index_path)
+    if not kw_hits:
+        return {}, vector_hits
+
+    vector_sorted = sorted(vector_hits, key=lambda x: x["score"], reverse=True)
+    rrf = retrieval.rrf_fuse(vector_sorted, kw_hits, wf.get("rrf_k", 60))
+
+    have  = {h.get("id") for h in vector_hits}
+    extra = []
+    for src in ("ticket", "doc"):
+        only = [h for h in kw_hits if h["id"] not in have and h.get("source") == src][:top_k]
+        if not only:
+            continue
+        ids = [h["id"] for h in only]
+        sc  = vectordb.scores_for_ids(ids, step_emb, error_emb, index_path,
+                                      source=src, error_weight=err_weight, error_floor=err_floor)
+        by_id = {h["id"]: h for h in only}
+        for id_, score in sc.items():
+            h = by_id[id_]
+            extra.append({"id": id_, "doc": h["doc"], "meta": h["meta"], "score": score})
+    return rrf, vector_hits + extra
+
+
+def _apply_hybrid(candidates: list, rrf: dict, wf: dict):
+    """Add a bounded RRF-derived delta to each candidate's rank_score (annotated as
+    hybrid_adj). Normalized to the strongest fused candidate so the boost is capped
+    at hybrid_weight (default 0.1)."""
+    weight  = wf.get("hybrid_weight", 0.1)
+    max_rrf = max(rrf.values(), default=0.0) or 1.0
+    for c in candidates:
+        r = rrf.get(c.get("_id"), 0.0)
+        adj = round((r / max_rrf) * weight, 4) if r else 0.0
+        c["hybrid_adj"] = adj
+        c["rank_score"] = c.get("rank_score", c["score"]) + adj
 
 
 def _apply_feedback(step: str, error: str, candidates: list, cfg: dict, threshold: float):

@@ -203,7 +203,7 @@ def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k,
 
     combined.sort(key=lambda x: x[1], reverse=True)
     return [
-        {"doc": doc_map[id_], "meta": meta_map[id_], "score": round(score, 3)}
+        {"id": id_, "doc": doc_map[id_], "meta": meta_map[id_], "score": round(score, 3)}
         for id_, score in combined[:top_k]
         if id_ in doc_map
     ]
@@ -220,6 +220,75 @@ def search_docs_dual(step_emb, error_emb, top_k, index_path, error_weight=0.65, 
     query, not when it merely shares boilerplate prose."""
     return _search_dual(*DOC_COLS, step_emb, error_emb, top_k, index_path,
                         error_weight, error_floor)
+
+
+# ── Hybrid-retrieval support ─────────────────────────────────────────────────
+
+def all_chunks(index_path: str) -> list[dict]:
+    """Every indexed chunk once, as {id, doc, meta, source} — the corpus the BM25
+    keyword index is built from. Unions the step + error collections (a chunk lands
+    in whichever side it has an embedding for) and dedups by id, across both tickets
+    and docs. The stored metadata already carries step/error/comment_body, so no
+    re-fetch from Jira is needed."""
+    out: dict = {}
+    for source, cols in (("ticket", TICKET_COLS), ("doc", DOC_COLS)):
+        for col_name in cols:
+            try:
+                got = _get_col(index_path, col_name).get(include=["documents", "metadatas"])
+            except Exception:
+                continue
+            for id_, doc, meta in zip(got.get("ids", []),
+                                      got.get("documents", []),
+                                      got.get("metadatas", [])):
+                if id_ not in out:
+                    out[id_] = {"id": id_, "doc": doc, "meta": meta or {}, "source": source}
+    return list(out.values())
+
+
+def scores_for_ids(ids: list[str], step_emb, error_emb, index_path: str,
+                   source: str = "ticket", error_weight: float = 0.65,
+                   error_floor: float = 0.0) -> dict:
+    """Cosine score (same dual-weighted formula as _search_dual) for a SPECIFIC set
+    of chunk ids — used to give keyword-only hits (found by BM25 but outside the
+    vector candidate pool) an honest, comparable score for the threshold/display.
+    MiniLM vectors are unit-length, so cosine = dot product."""
+    if not ids:
+        return {}
+    cols = TICKET_COLS if source == "ticket" else DOC_COLS
+
+    def _emb_map(col_name, want):
+        if not want:
+            return {}
+        try:
+            got = _get_col(index_path, col_name).get(ids=ids, include=["embeddings"])
+        except Exception:
+            return {}
+        return {i: e for i, e in zip(got.get("ids", []), got.get("embeddings", []))}
+
+    step_e  = _emb_map(cols[0], step_emb  is not None)
+    error_e = _emb_map(cols[1], error_emb is not None)
+
+    def _cos(q, v):
+        return sum(a * b for a, b in zip(q, v))
+
+    out = {}
+    for id_ in ids:
+        use_step  = step_emb  is not None and id_ in step_e
+        use_error = error_emb is not None and id_ in error_e
+        s = _cos(step_emb,  step_e[id_])  if use_step  else 0.0
+        e = _cos(error_emb, error_e[id_]) if use_error else 0.0
+        if use_step and use_error:
+            if e < error_floor:
+                continue
+            score = s * (1 - error_weight) + e * error_weight
+        elif use_step:
+            score = s
+        elif use_error:
+            score = e
+        else:
+            continue
+        out[id_] = round(score, 3)
+    return out
 
 
 # ── Misc ───────────────────────────────────────────────────────────────────────

@@ -8,6 +8,9 @@
     "ingest_jql": "project = SAC AND status in (Resolved, Cancelled, Closed) AND \"Reporting Area[Dropdown]\" = \"Order Fallout\" AND updated >= -90d",
     "top_k": 10,
     "score_threshold": 0.7,
+    "hybrid_enabled": true,
+    "rrf_k": 60,
+    "hybrid_weight": 0.1,
     "llm_rerank": true,
     "index_path": "trackers/workaround_index",
     "docs_path": "trackers/workaround_docs",
@@ -24,6 +27,7 @@
     "provider": "groq",
     "model": "llama-3.1-8b-instant",
     "fallback": ["cerebras", "local"],
+    "max_retries": 2,
     "ollama_url": "http://localhost:11434"
   },
   "embed": {

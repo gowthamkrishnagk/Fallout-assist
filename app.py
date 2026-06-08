@@ -507,6 +507,8 @@ def llm_providers():
         "providers": PROVIDERS,
         "models":    {**PROVIDER_MODELS, "local": [m["name"] for m in local_models]},
         "current":   {"provider": cfg["llm"]["provider"], "model": cfg["llm"]["model"]},
+        # Auto-failover order tried when the selected provider errors/rate-limits.
+        "fallback":  cfg["llm"].get("fallback", []),
         # Which providers already have key(s) saved in .env → drives the masked
         # "Key saved" UI state per provider. key_counts powers the multi-key editor
         # (a provider may hold several rotating free-tier keys).
@@ -572,6 +574,11 @@ def llm_config_set(body: dict):
     cfg                = load_config()
     cfg["llm"]["provider"] = provider
     cfg["llm"]["model"]    = model
+    # Optional fallback order: providers tried (in order) when the selected one
+    # errors/rate-limits. Validated against known providers; unknown names dropped.
+    if "fallback" in body and isinstance(body["fallback"], list):
+        cfg["llm"]["fallback"] = [p for p in body["fallback"]
+                                  if p in PROVIDERS and p != provider]
     save_config(cfg)
 
     # A key supplied here is APPENDED to the provider's rotation list (not an

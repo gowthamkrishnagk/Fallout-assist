@@ -236,6 +236,14 @@
           <div class="key-hint">Add several free-tier keys to spread quota. Keys are saved to .env on your machine — never committed to git.</div>
         </div>
 
+        <div id="fallback-row" style="margin-top:14px">
+          <label class="field-label">Fallback order
+            <span class="muted" style="font-weight:400;font-size:12px">— providers tried, in order, if the one above is down or rate-limited</span>
+          </label>
+          <input type="text" id="llm-fallback" class="input-text" style="width:100%" placeholder="e.g. groq, local">
+          <div class="key-hint">Comma-separated: groq, cerebras, nvidia, claude, local. "local" runs only if Ollama is installed.</div>
+        </div>
+
         <div class="llm-actions">
           <button class="btn-secondary" onclick="testLLM()">⚡ Test connection</button>
           <button class="btn-primary" onclick="saveLLM()">Save</button>
@@ -777,6 +785,8 @@ async function loadLLMProviders() {
   _providerHasKey = r.has_keys || {};
   _providerKeyCounts = r.key_counts || {};
   _currentProvider = r.current.provider;
+  const fb = document.getElementById('llm-fallback');
+  if (fb) fb.value = (r.fallback || []).join(', ');
   document.getElementById('llm-enabled-toggle').checked    = r.enabled !== false;
   document.getElementById('llm-synthesize-toggle').checked = r.synthesize !== false;
   document.getElementById('llm-rerank-toggle').checked     = !!r.rerank;
@@ -936,13 +946,15 @@ async function testLLM() {
 async function saveLLM() {
   const provider = _currentProvider;
   const model    = document.getElementById('llm-model').value;
+  const fbEl     = document.getElementById('llm-fallback');
+  const fallback = fbEl ? fbEl.value.split(',').map(s => s.trim()).filter(Boolean) : undefined;
   const input    = document.getElementById('llm-api-key');
   // Key(s) left in the add box on Save are appended via the bulk keys endpoint
   // (which splits multiple keys), so a user who pastes keys then clicks Save
   // instead of "Add keys" doesn't lose them and a multi-key paste isn't stored
   // as one blob.
   const api_key  = input ? input.value.trim() : '';
-  const r = await post('/api/llm/config', { provider, model });
+  const r = await post('/api/llm/config', { provider, model, fallback });
   if (r.ok) {
     if (api_key && _providers[provider]?.needs_key) {
       await post('/api/llm/keys', { provider, action: 'add', api_key });

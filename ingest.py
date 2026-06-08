@@ -471,6 +471,13 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                     vectordb.reset_ticket_collections(index_path)
                 vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
 
+            # Refresh the BM25 keyword index so hybrid search reflects this pass.
+            try:
+                import retrieval
+                retrieval.build_keyword_index(index_path)
+            except Exception as _e:
+                print(f"[BM25] keyword index refresh skipped: {_e}")
+
             _save_state({"last_jira_sync": datetime.utcnow().isoformat(),
                          "tickets":      known,
                          "jira_count":   len(known),
@@ -622,6 +629,11 @@ def ingest_document(file_bytes: bytes, filename: str, cfg: dict) -> dict:
         step_embs  = [embedder.embed_one(step_text,  embed_model)]
         error_embs = [embedder.embed_one(error_text, embed_model)]
         vectordb.add_docs_dual([doc_id], step_embs, error_embs, [display], [meta], index_path)
+        try:
+            import retrieval
+            retrieval.build_keyword_index(index_path)
+        except Exception as _e:
+            print(f"[BM25] keyword index refresh skipped: {_e}")
 
         _save_doc_meta(doc_id, filename, 1)
         return {"ok": True, "doc_id": doc_id, "chunks": 1, "filename": filename,
