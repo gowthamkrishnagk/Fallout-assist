@@ -190,6 +190,18 @@ _RESOLVED_STATUSES = {"resolved", "closed", "done", "cancelled", "canceled",
 # couple of minutes of the ticket being resolved.
 _RESOLUTION_WINDOW_SECONDS = 120  # ±2 min
 
+# A bare acknowledgement with no resolution content — never the real fix, even from
+# the assignee.
+_BARE_CLOSER = re.compile(
+    r'(?i)^\s*(done|fixed|ok|okay|n/?a|closing|closed|resolved|thanks?|ty|noted)[.! ]*$')
+
+# A routing/meta note (a lead tagging who actually worked the ticket, e.g. "This
+# ticket is worked by <name>, the actual shift assignee") — carries no fix, so it
+# must never be stored as the resolution. Kept specific so a genuine fix that merely
+# mentions reassignment isn't dropped.
+_META_NOTE = re.compile(
+    r'(?i)(this (ticket|issue) is (being )?(worked|handled) by|shift assignee|actual (shift )?assignee)')
+
 
 def _resolution_event(issue):
     """From the issue changelog, find WHEN the ticket was resolved and WHO did it.
@@ -260,15 +272,29 @@ def _get_resolution_comments(issue) -> list[dict]:
             return True
         return False
 
-    human = [
-        {"author": c.author.displayName,
-         "body": extract_fix_block(_clean(c.body)),
-         "epoch": _to_epoch(getattr(c, "created", "") or ""),
-         "is_assignee": _is_assignee(c)}
-        for c in comments
-        if c.body and len(c.body.strip()) > 40
-        and not _is_bot(c.author.displayName)
-    ]
+    # Build the human-comment pool. A short comment is kept ONLY when it's the
+    # assignee's and isn't a bare closer — the assignee's terse note during
+    # resolution ("retried", "reprocessed", "re-triggered the step") IS the fix, and
+    # the >40-char rule would otherwise discard it. Everyone else needs a substantive
+    # body. "worked by <name> / shift assignee" routing notes are dropped outright.
+    human = []
+    for c in comments:
+        if _is_bot(c.author.displayName):
+            continue
+        raw = (c.body or "").strip()
+        if not raw or _META_NOTE.search(raw):
+            continue
+        is_asg      = _is_assignee(c)
+        substantive = len(raw) > 40
+        short_asg   = is_asg and len(raw) >= 3 and not _BARE_CLOSER.match(raw)
+        if not (substantive or short_asg):
+            continue
+        human.append({
+            "author":      c.author.displayName,
+            "body":        extract_fix_block(_clean(c.body)),
+            "epoch":       _to_epoch(getattr(c, "created", "") or ""),
+            "is_assignee": is_asg,
+        })
     if not human:
         return []
 
