@@ -291,6 +291,27 @@ def scores_for_ids(ids: list[str], step_emb, error_emb, index_path: str,
     return out
 
 
+def chunks_by_ids(ids: list[str], index_path: str, source: str = "ticket") -> dict:
+    """{id: {doc, meta}} for specific chunk ids — used to materialize graph-expanded
+    sibling chunks once they've been scored. Unions the step + error collections so a
+    chunk indexed on only one side is still found."""
+    if not ids:
+        return {}
+    cols = TICKET_COLS if source == "ticket" else DOC_COLS
+    out: dict = {}
+    for col_name in cols:
+        try:
+            got = _get_col(index_path, col_name).get(ids=ids, include=["documents", "metadatas"])
+        except Exception:
+            continue
+        for id_, doc, meta in zip(got.get("ids", []),
+                                  got.get("documents", []),
+                                  got.get("metadatas", [])):
+            if id_ not in out:
+                out[id_] = {"doc": doc, "meta": meta or {}}
+    return out
+
+
 # ── Misc ───────────────────────────────────────────────────────────────────────
 
 def get_ticket_meta(key: str, index_path: str) -> dict:

@@ -506,12 +506,18 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                     vectordb.reset_ticket_collections(index_path)
                 vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
 
-            # Refresh the BM25 keyword index so hybrid search reflects this pass.
+            # Refresh the BM25 keyword index + ticket graph so hybrid and graph
+            # expansion reflect this pass.
             try:
                 import retrieval
                 retrieval.build_keyword_index(index_path)
             except Exception as _e:
                 print(f"[BM25] keyword index refresh skipped: {_e}")
+            try:
+                import graph
+                graph.build_graph(index_path)
+            except Exception as _e:
+                print(f"[GRAPH] graph refresh skipped: {_e}")
 
             _save_state({"last_jira_sync": datetime.utcnow().isoformat(),
                          "tickets":      known,

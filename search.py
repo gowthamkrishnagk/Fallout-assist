@@ -111,6 +111,14 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
         rrf, all_hits = _hybrid_augment(step, error, step_emb, error_emb,
                                         all_hits, index_path, wf, err_weight, err_floor)
 
+    # Graph expansion: pull in sibling tickets that share this failure's signature
+    # (same step+error) or are pointer-linked, even when their comment wording
+    # matched neither vector nor keyword search. Surfaces a fix that lives on a
+    # related ticket. LLM-free — costs no quota.
+    if wf.get("graph_enabled", True):
+        all_hits = _graph_augment(step_emb, error_emb, all_hits, index_path,
+                                  wf, err_weight, err_floor)
+
     # Build a single cosine-sorted candidate list (dedup tickets, drop weak docs).
     candidates   = []
     seen_tickets = set()
@@ -267,6 +275,58 @@ def _hybrid_augment(step: str, error: str, step_emb, error_emb, vector_hits: lis
             h = by_id[id_]
             extra.append({"id": id_, "doc": h["doc"], "meta": h["meta"], "score": score})
     return rrf, vector_hits + extra
+
+
+def _graph_augment(step_emb, error_emb, all_hits: list, index_path: str, wf: dict,
+                   err_weight: float, err_floor: float):
+    """Expand the top ticket hits to their graph siblings (same failure signature /
+    pointer-linked), score the new chunks with the same dual cosine, and add the best
+    chunk per sibling ticket. Best-effort: returns all_hits unchanged on any failure.
+
+    Returns the augmented hit list."""
+    import graph
+    seed_cap = wf.get("graph_seed", 6)
+    cap      = wf.get("graph_neighbor_cap", 8)
+
+    seeds, have_keys = [], set()
+    for h in sorted(all_hits, key=lambda x: x["score"], reverse=True):
+        m = h.get("meta", {})
+        if m.get("source") != "ticket":
+            continue
+        k = m.get("key")
+        if k:
+            have_keys.add(k)
+            if k not in seeds and len(seeds) < seed_cap:
+                seeds.append(k)
+    if not seeds:
+        return all_hits
+
+    neighbors = graph.expand(seeds, index_path, cap=cap)
+    new_ids   = [cid for nb in neighbors for cid in nb["chunk_ids"]]
+    if not new_ids:
+        return all_hits
+
+    scores = vectordb.scores_for_ids(new_ids, step_emb, error_emb, index_path,
+                                     source="ticket", error_weight=err_weight,
+                                     error_floor=err_floor)
+    if not scores:
+        return all_hits
+    detail = vectordb.chunks_by_ids(list(scores), index_path, source="ticket")
+
+    # Best-scoring chunk per NEW sibling ticket (skip tickets already in the pool).
+    best: dict = {}
+    for id_, sc in scores.items():
+        d   = detail.get(id_)
+        key = d["meta"].get("key") if d else None
+        if not key or key in have_keys:
+            continue
+        if key not in best or sc > best[key][0]:
+            best[key] = (sc, id_)
+
+    extra = [{"id": id_, "doc": detail[id_]["doc"], "meta": detail[id_]["meta"],
+              "score": sc, "via_graph": True}
+             for sc, id_ in best.values()]
+    return all_hits + extra
 
 
 def _apply_hybrid(candidates: list, rrf: dict, wf: dict):
