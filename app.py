@@ -5,6 +5,7 @@ Run: uvicorn app:app --reload --port 8010
 
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -506,9 +507,11 @@ def llm_providers():
         "providers": PROVIDERS,
         "models":    {**PROVIDER_MODELS, "local": [m["name"] for m in local_models]},
         "current":   {"provider": cfg["llm"]["provider"], "model": cfg["llm"]["model"]},
-        # Which providers already have a key saved in .env → drives the masked
-        # "Key saved" UI state per provider.
-        "has_keys":  {p: bool(os.getenv(_key_env(p), "").strip()) for p in PROVIDERS},
+        # Which providers already have key(s) saved in .env → drives the masked
+        # "Key saved" UI state per provider. key_counts powers the multi-key editor
+        # (a provider may hold several rotating free-tier keys).
+        "has_keys":   {p: bool(g._provider_keys(_key_env(p))) for p in PROVIDERS},
+        "key_counts": {p: len(g._provider_keys(_key_env(p))) for p in PROVIDERS},
         "enabled":   cfg["workaround_finder"].get("llm_enabled", True),
         "rerank":    cfg["workaround_finder"].get("llm_rerank", False),
         "synthesize": cfg["workaround_finder"].get("llm_synthesize", True),
@@ -571,12 +574,45 @@ def llm_config_set(body: dict):
     cfg["llm"]["model"]    = model
     save_config(cfg)
 
+    # A key supplied here is APPENDED to the provider's rotation list (not an
+    # overwrite) so saving provider/model never wipes other keys. Multi-key
+    # management proper lives in /api/llm/keys.
     if api_key:
-        env_var = _key_env(provider)
-        _write_env(env_var, api_key)
-        os.environ[env_var] = api_key
+        _add_provider_key(provider, api_key)
 
     return {"ok": True, "provider": provider, "model": model}
+
+
+@app.get("/api/llm/keys")
+def llm_keys_get(provider: str):
+    """Masked list of keys configured for a provider (fingerprint + last 4 chars).
+    Never returns the secret itself."""
+    if provider not in PROVIDERS:
+        raise HTTPException(400, f"Unknown provider: {provider}")
+    return {"ok": True, "provider": provider, "keys": _masked_keys(provider)}
+
+
+@app.post("/api/llm/keys")
+def llm_keys_mutate(body: dict):
+    """Add or remove one key in a provider's rotation list (stored comma-separated
+    in .env). Returns the updated masked list. body: {provider, action, api_key|fp}."""
+    provider = body.get("provider", "")
+    action   = body.get("action", "")
+    if provider not in PROVIDERS:
+        raise HTTPException(400, f"Unknown provider: {provider}")
+    if action == "add":
+        # Accept one OR many keys in a single request (comma- or newline-separated)
+        # so the user can paste a whole batch of free-tier keys at once.
+        raw   = body.get("api_key", "")
+        added = sum(1 for k in re.split(r'[,\n]', raw) if _add_provider_key(provider, k))
+        return {"ok": True, "added": added, "keys": _masked_keys(provider)}
+    if action == "remove":
+        import generate as g
+        fp   = body.get("fp", "")
+        keys = [k for k in _provider_keys_list(provider) if g._key_fp(k) != fp]
+        _set_provider_keys(provider, keys)
+        return {"ok": True, "removed": True, "keys": _masked_keys(provider)}
+    raise HTTPException(400, f"Unknown action: {action}")
 
 
 @app.post("/api/llm/test")
@@ -606,6 +642,45 @@ def llm_quota():
 def _key_env(provider: str) -> str:
     return {"groq": "GROQ_API_KEY", "cerebras": "CEREBRAS_API_KEY",
             "nvidia": "NVIDIA_API_KEY", "claude": "ANTHROPIC_API_KEY"}.get(provider, "")
+
+
+# ── Multi-key storage ────────────────────────────────────────────────────────
+# Keys are stored comma-separated in one .env var per provider
+# (GROQ_API_KEY=k1,k2,k3) — kept out of the git-committed config.json. generate.py
+# rotates across them; these helpers add/remove/list them for the Settings UI.
+
+def _provider_keys_list(provider: str) -> list[str]:
+    import generate as g
+    return g._provider_keys(_key_env(provider))
+
+
+def _set_provider_keys(provider: str, keys: list[str]):
+    env_var = _key_env(provider)
+    if not env_var:
+        return
+    val = ",".join(keys)
+    _write_env(env_var, val)
+    os.environ[env_var] = val
+
+
+def _add_provider_key(provider: str, api_key: str) -> bool:
+    """Append a key to the provider's rotation list. No-op (returns False) if the
+    key is blank or already present."""
+    import generate as g
+    api_key = (api_key or "").strip()
+    if not api_key:
+        return False
+    keys = _provider_keys_list(provider)
+    if any(g._key_fp(k) == g._key_fp(api_key) for k in keys):
+        return False
+    keys.append(api_key)
+    _set_provider_keys(provider, keys)
+    return True
+
+
+def _masked_keys(provider: str) -> list[dict]:
+    import generate as g
+    return [{"fp": g._key_fp(k), "last4": k[-4:]} for k in _provider_keys_list(provider)]
 
 
 def _write_env(key: str, value: str):

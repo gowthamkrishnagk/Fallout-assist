@@ -219,21 +219,21 @@
         <select id="llm-model" class="input-text" style="width:100%"></select>
 
         <div id="api-key-row" class="hidden" style="margin-top:12px">
-          <label class="field-label">API Key</label>
+          <label class="field-label">API Keys
+            <span class="muted" style="font-weight:400;font-size:12px">— add several free-tier keys; the app rotates across them and skips any that hit its rate limit</span>
+          </label>
 
-          <!-- Saved state: masked dots + Edit -->
-          <div id="llm-key-saved-row" class="masked-field-row hidden">
-            <span class="masked-value">••••••••••••••••••••••••</span>
-            <span class="masked-set-label">Key saved</span>
-            <button class="btn-secondary" style="padding:6px 14px;font-size:13px" onclick="editLLMKey()">Edit</button>
-          </div>
+          <!-- Saved keys, masked, each removable -->
+          <div id="llm-key-list" class="key-list"></div>
 
-          <!-- Edit / empty state: password input -->
-          <div id="llm-key-edit-row">
-            <input type="password" id="llm-api-key" class="input-text" placeholder="Paste your key here" style="width:100%">
-            <button id="llm-key-cancel-btn" class="btn-secondary hidden" style="margin-top:8px;font-size:13px;padding:6px 14px" onclick="cancelEditLLMKey()">✕ Cancel</button>
-            <div class="key-hint">Key is saved to .env on your machine — never committed to git.</div>
+          <!-- Add one or more keys at once -->
+          <div class="key-add-row">
+            <textarea id="llm-api-key" class="input-text" rows="2"
+                      placeholder="Paste one or more keys — one per line, or comma-separated"
+                      style="flex:1;resize:vertical;font-family:ui-monospace,monospace"></textarea>
+            <button class="btn-secondary" style="padding:8px 14px;font-size:13px;white-space:nowrap" onclick="addLLMKey()">+ Add keys</button>
           </div>
+          <div class="key-hint">Add several free-tier keys to spread quota. Keys are saved to .env on your machine — never committed to git.</div>
         </div>
 
         <div class="llm-actions">
@@ -768,12 +768,14 @@ async function deleteDoc(docId, filename) {
 let _providers = {}; let _allModels = {}; let _currentProvider = 'local';
 
 let _providerHasKey = {};
+let _providerKeyCounts = {};
 
 async function loadLLMProviders() {
   const r = await get('/api/llm/providers');
   _providers    = r.providers;
   _allModels    = r.models;
   _providerHasKey = r.has_keys || {};
+  _providerKeyCounts = r.key_counts || {};
   _currentProvider = r.current.provider;
   document.getElementById('llm-enabled-toggle').checked    = r.enabled !== false;
   document.getElementById('llm-synthesize-toggle').checked = r.synthesize !== false;
@@ -805,30 +807,57 @@ function selectProvider(key, preselectedModel) {
 
   const needsKey = _providers[key]?.needs_key;
   document.getElementById('api-key-row').classList.toggle('hidden', !needsKey);
-  if (needsKey) _applyLLMKeyState(!!_providerHasKey[key], false);
+  if (needsKey) loadLLMKeys(key);
 }
 
-// Masked "Key saved" vs editable input, mirroring the Jira token field.
-function _applyLLMKeyState(isSaved, isEditing) {
+// ── Multi-key editor ─────────────────────────────────────────────────────────
+// A provider can hold several rotating free-tier keys. We show each saved key
+// masked (last 4 chars) with a remove button, plus an input to add more.
+async function loadLLMKeys(provider) {
+  const list = document.getElementById('llm-key-list');
+  list.innerHTML = '<em class="muted" style="font-size:13px">Loading…</em>';
   document.getElementById('llm-api-key').value = '';
-  if (isSaved && !isEditing) {
-    showEl('llm-key-saved-row');
-    hideEl('llm-key-edit-row');
-    hideEl('llm-key-cancel-btn');
+  let r;
+  try { r = await get('/api/llm/keys?provider=' + encodeURIComponent(provider)); }
+  catch (e) { list.innerHTML = ''; return; }
+  _renderKeyList(provider, r.keys || []);
+}
+
+function _renderKeyList(provider, keys) {
+  _providerKeyCounts[provider] = keys.length;
+  _providerHasKey[provider]    = keys.length > 0;
+  const list = document.getElementById('llm-key-list');
+  if (!keys.length) {
+    list.innerHTML = '<div class="muted" style="font-size:13px;padding:4px 0">No keys yet — add one below.</div>';
+    return;
+  }
+  list.innerHTML = keys.map((k, i) => `
+    <div class="key-chip">
+      <span class="key-mask">Key ${i + 1} · •••• ${k.last4}</span>
+      <button class="key-remove" title="Remove this key"
+              onclick="removeLLMKey('${provider}','${k.fp}')">✕</button>
+    </div>`).join('');
+}
+
+async function addLLMKey() {
+  const input   = document.getElementById('llm-api-key');
+  const api_key = input.value.trim();
+  if (!api_key) return;
+  const r = await post('/api/llm/keys', { provider: _currentProvider, action: 'add', api_key });
+  if (r && r.ok) {
+    input.value = '';
+    _renderKeyList(_currentProvider, r.keys || []);
+    if (r.added === 0) alert('No new keys added — they may already be saved.');
+    loadLLMStatus();
   } else {
-    hideEl('llm-key-saved-row');
-    showEl('llm-key-edit-row');
-    if (isSaved) showEl('llm-key-cancel-btn'); else hideEl('llm-key-cancel-btn');
+    alert('Could not add keys');
   }
 }
 
-function editLLMKey() {
-  _applyLLMKeyState(true, true);
-  document.getElementById('llm-api-key').focus();
-}
-
-function cancelEditLLMKey() {
-  _applyLLMKeyState(true, false);
+async function removeLLMKey(provider, fp) {
+  if (!confirm('Remove this key from the rotation?')) return;
+  const r = await post('/api/llm/keys', { provider, action: 'remove', fp });
+  if (r && r.ok) { _renderKeyList(provider, r.keys || []); loadLLMStatus(); }
 }
 
 // Grey out + disable the sub-toggles when the master LLM switch is off.
@@ -907,11 +936,19 @@ async function testLLM() {
 async function saveLLM() {
   const provider = _currentProvider;
   const model    = document.getElementById('llm-model').value;
-  const api_key  = document.getElementById('llm-api-key').value.trim();
-  const r = await post('/api/llm/config', { provider, model, api_key });
+  const input    = document.getElementById('llm-api-key');
+  // Key(s) left in the add box on Save are appended via the bulk keys endpoint
+  // (which splits multiple keys), so a user who pastes keys then clicks Save
+  // instead of "Add keys" doesn't lose them and a multi-key paste isn't stored
+  // as one blob.
+  const api_key  = input ? input.value.trim() : '';
+  const r = await post('/api/llm/config', { provider, model });
   if (r.ok) {
-    if (api_key) _providerHasKey[provider] = true;   // a new key was just stored
-    if (_providers[provider]?.needs_key) _applyLLMKeyState(!!_providerHasKey[provider], false);
+    if (api_key && _providers[provider]?.needs_key) {
+      await post('/api/llm/keys', { provider, action: 'add', api_key });
+      input.value = '';
+      loadLLMKeys(provider);
+    }
     alert(`✅ Saved: ${provider} / ${model}`);
     loadLLMStatus();
   } else {

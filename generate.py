@@ -12,6 +12,7 @@ Supported providers:
 import os
 import re
 import time
+import hashlib
 import httpx
 
 
@@ -30,16 +31,18 @@ except Exception:
 
 
 # Latest Groq rate-limit snapshot, captured from real API response headers so the
-# UI can show remaining quota without spending an extra request. Updated in-place
-# by _groq(); read via get_groq_quota().
+# UI can show remaining quota without spending an extra request. `_groq_quota` is
+# the latest snapshot (whichever key answered last); `_groq_quota_by_key` keeps a
+# per-key snapshot so the UI can show which of several rotating keys is live.
 _groq_quota: dict = {}
+_groq_quota_by_key: dict = {}   # key_fp -> snapshot
 
 
-def _capture_groq_quota(resp: httpx.Response):
+def _capture_groq_quota(resp: httpx.Response, key_fp: str = "", key_last4: str = ""):
     h = resp.headers
     if "x-ratelimit-remaining-requests" not in h and "x-ratelimit-remaining-tokens" not in h:
         return
-    _groq_quota.update({
+    snap = {
         "remaining_requests": h.get("x-ratelimit-remaining-requests"),
         "limit_requests":     h.get("x-ratelimit-limit-requests"),      # RPD
         "remaining_tokens":   h.get("x-ratelimit-remaining-tokens"),
@@ -47,11 +50,81 @@ def _capture_groq_quota(resp: httpx.Response):
         "reset_requests":     h.get("x-ratelimit-reset-requests"),
         "reset_tokens":       h.get("x-ratelimit-reset-tokens"),
         "updated":            time.time(),
-    })
+        "key":                key_last4,
+    }
+    _groq_quota.update(snap)
+    if key_fp:
+        _groq_quota_by_key[key_fp] = snap
 
 
 def get_groq_quota() -> dict:
-    return dict(_groq_quota)
+    q = dict(_groq_quota)
+    if _groq_quota_by_key:
+        q["by_key"] = {fp: dict(s) for fp, s in _groq_quota_by_key.items()}
+    return q
+
+
+# ── Multi-key rotation ───────────────────────────────────────────────────────
+# A provider's env var may hold SEVERAL free-tier keys (comma- or newline-
+# separated): GROQ_API_KEY=k1,k2,k3. We round-robin across them and, when one is
+# rate-limited (429), put just that key on cooldown until its reset and move to
+# the next key. Only when ALL of a provider's keys are exhausted does the call
+# raise — which then triggers the existing provider failover in generate().
+_key_cursor:   dict = {}   # provider -> monotonic counter (round-robin start point)
+_key_cooldown: dict = {}   # (provider, key_fp) -> unix ts until which the key is skipped
+
+
+def _provider_keys(env_var: str) -> list[str]:
+    """All keys configured for a provider, in order. Accepts comma- or newline-
+    separated values so one env var can hold several free-tier keys."""
+    return [k.strip() for k in re.split(r'[,\n]', os.getenv(env_var, "")) if k.strip()]
+
+
+def _key_fp(key: str) -> str:
+    """Stable short fingerprint of a key — used as a cooldown/quota map id without
+    storing the secret itself."""
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def _ordered_keys(provider: str, env_var: str) -> list[str]:
+    """Keys to try this call, in rotation order. Round-robins the start point so
+    load spreads across keys; keys still in cooldown are moved to the back so they
+    are only retried if every other key is also cooled."""
+    keys = _provider_keys(env_var)
+    if not keys:
+        return []
+    n = _key_cursor.get(provider, 0)
+    _key_cursor[provider] = n + 1
+    start   = n % len(keys)
+    rotated = keys[start:] + keys[:start]
+    now     = time.time()
+    live    = [k for k in rotated if _key_cooldown.get((provider, _key_fp(k)), 0) <= now]
+    cooled  = [k for k in rotated if _key_cooldown.get((provider, _key_fp(k)), 0) >  now]
+    return live + cooled
+
+
+def _parse_reset(val: str) -> float:
+    """Seconds from a rate-limit reset header: plain seconds ('2.5'), a duration
+    ('1m30s', '500ms'), or a Retry-After integer. Falls back to 60s."""
+    val = str(val or "").strip().lower()
+    if re.fullmatch(r'\d+(?:\.\d+)?', val):
+        return float(val)
+    total = 0.0
+    for num, unit in re.findall(r'(\d+(?:\.\d+)?)\s*(ms|s|m|h)', val):
+        total += float(num) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
+    return total or 60.0
+
+
+def _cool_key(provider: str, key: str, resp: httpx.Response | None):
+    """Mark a key rate-limited until its reset (header-driven, default 60s)."""
+    secs = 60.0
+    if resp is not None:
+        h = resp.headers
+        hint = (h.get("x-ratelimit-reset-requests") or h.get("x-ratelimit-reset-tokens")
+                or h.get("retry-after"))
+        if hint:
+            secs = _parse_reset(hint)
+    _key_cooldown[(provider, _key_fp(key))] = time.time() + min(secs, 3600)
 
 
 # OpenAI-compatible cloud providers — all speak the same /chat/completions schema
@@ -165,53 +238,86 @@ def _local(prompt: str, model: str, ollama_url: str) -> dict:
 
 def _openai_chat(prompt: str, model: str, provider: str) -> dict:
     """One client for every OpenAI-compatible provider (Groq / Cerebras / NVIDIA).
-    Surfaces the API's real error message (key-redacted) instead of a bare status."""
-    spec    = OPENAI_COMPAT[provider]
-    api_key = os.getenv(spec["key"], "")
-    if not api_key:
+    Surfaces the API's real error message (key-redacted) instead of a bare status.
+
+    Rotates across every key configured for the provider: a rate-limited (429) key
+    is put on cooldown and the next key is tried. Only a 429 burns through to the
+    next key — any other 4xx/5xx is a real failure (bad model, bad key) and raises
+    immediately so it isn't masked by trying more keys. Raises when all keys are
+    rate-limited, which lets generate() fall through to the next provider."""
+    spec = OPENAI_COMPAT[provider]
+    keys = _ordered_keys(provider, spec["key"])
+    if not keys:
         raise ValueError(f"{spec['key']} not set in .env")
-    resp = httpx.post(
-        spec["url"],
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model,
-              "messages": [{"role": "user", "content": prompt}],
-              "temperature": 0.2},
-        timeout=60,
-    )
-    if provider == "groq":
-        _capture_groq_quota(resp)   # record remaining quota even on a 429
-    if resp.status_code >= 400:
-        # Different providers shape errors differently: OpenAI/Groq use
-        # {"error":{"message":...}}, Cerebras/NVIDIA use {"detail":...} or
-        # {"message":...}. Try all so the real reason is never lost.
-        reason = ""
-        try:
-            j   = resp.json()
-            err = j.get("error")
-            reason = (err.get("message") if isinstance(err, dict) else err) \
-                     or j.get("detail") or j.get("message") or ""
-        except Exception:
-            reason = resp.text[:200]
-        raise ValueError(f"{provider} {resp.status_code}: {_redact(reason)}")
-    answer = resp.json()["choices"][0]["message"]["content"].strip()
-    return {"answer": answer, "provider": provider, "model": model}
+
+    rate_limited = []
+    for api_key in keys:
+        resp = httpx.post(
+            spec["url"],
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0.2},
+            timeout=60,
+        )
+        if provider == "groq":
+            _capture_groq_quota(resp, _key_fp(api_key), api_key[-4:])   # quota even on 429
+        if resp.status_code == 429:
+            _cool_key(provider, api_key, resp)
+            rate_limited.append(f"…{api_key[-4:]}")
+            if len(keys) > 1:
+                print(f"[LLM] {provider} key …{api_key[-4:]} rate-limited — rotating to next key")
+            continue
+        if resp.status_code >= 400:
+            # Different providers shape errors differently: OpenAI/Groq use
+            # {"error":{"message":...}}, Cerebras/NVIDIA use {"detail":...} or
+            # {"message":...}. Try all so the real reason is never lost.
+            reason = ""
+            try:
+                j   = resp.json()
+                err = j.get("error")
+                reason = (err.get("message") if isinstance(err, dict) else err) \
+                         or j.get("detail") or j.get("message") or ""
+            except Exception:
+                reason = resp.text[:200]
+            raise ValueError(f"{provider} {resp.status_code}: {_redact(reason)}")
+        answer = resp.json()["choices"][0]["message"]["content"].strip()
+        return {"answer": answer, "provider": provider, "model": model}
+
+    raise ValueError(f"{provider} 429: all {len(keys)} key(s) rate-limited "
+                     f"({', '.join(rate_limited)})")
 
 
 def _claude(prompt: str, model: str) -> dict:
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
+    """Anthropic Claude with the same multi-key rotation as the OpenAI-compatible
+    providers: a 429'd key is cooled and the next key tried; any other error
+    raises so it isn't masked. Raises when every key is rate-limited."""
+    keys = _ordered_keys("claude", "ANTHROPIC_API_KEY")
+    if not keys:
         raise ValueError("ANTHROPIC_API_KEY not set in .env")
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
-        json={"model": model or "claude-haiku-4-5-20251001",
-              "max_tokens": 1024,
-              "messages": [{"role": "user", "content": prompt}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    answer = resp.json()["content"][0]["text"].strip()
-    return {"answer": answer, "provider": "claude", "model": model}
+
+    rate_limited = []
+    for api_key in keys:
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={"model": model or "claude-haiku-4-5-20251001",
+                  "max_tokens": 1024,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            _cool_key("claude", api_key, resp)
+            rate_limited.append(f"…{api_key[-4:]}")
+            if len(keys) > 1:
+                print(f"[LLM] claude key …{api_key[-4:]} rate-limited — rotating to next key")
+            continue
+        resp.raise_for_status()
+        answer = resp.json()["content"][0]["text"].strip()
+        return {"answer": answer, "provider": "claude", "model": model}
+
+    raise ValueError(f"claude 429: all {len(keys)} key(s) rate-limited "
+                     f"({', '.join(rate_limited)})")
 
 
 def available_local_models(ollama_url: str = "http://localhost:11434") -> list[dict]:
@@ -251,9 +357,10 @@ def provider_status(cfg: dict) -> dict:
 
         env_var = (OPENAI_COMPAT.get(provider, {}).get("key")
                    or {"claude": "ANTHROPIC_API_KEY"}.get(provider, ""))
-        key = os.getenv(env_var, "")
-        if not key:
+        keys = _provider_keys(env_var)
+        if not keys:
             return _bad(f"No API key set ({env_var})")
+        key = keys[0]   # any configured key proves reachability + auth
 
         if provider in OPENAI_COMPAT:
             # OpenAI-compatible /models endpoint = cheap reachability + auth check
