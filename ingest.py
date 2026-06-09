@@ -713,6 +713,43 @@ def list_documents(cfg: dict) -> list[dict]:
     return list(_load_doc_meta().values())
 
 
+def ingest_suggestion(step: str, error: str, body: str, sid: str, cfg: dict) -> dict:
+    """Index an APPROVED user-submitted workaround on its failure's (step, error) —
+    the same dual-embedding basis as tickets/docs — so it surfaces for that failure
+    and semantically similar ones. Stored in the DOC collections (which survive a
+    ticket re-ingest), but NOT tracked in the document meta or written to disk, so it
+    never appears in the Documents UI. suggestions.json is its source of truth."""
+    wf          = cfg["workaround_finder"]
+    index_path  = str(Path(__file__).parent / wf["index_path"])
+    embed_model = cfg["embed"]["model"]
+
+    step, error, body = (step or "").strip(), (error or "").strip(), (body or "").strip()
+    if not body:
+        return {"ok": False, "error": "empty suggestion body"}
+    if not step and not error:
+        return {"ok": False, "error": "suggestion has no step/error to index against"}
+
+    chunk_id = f"usr_{sid}"
+    # Remove any prior version (re-approval / re-index) before adding.
+    vectordb.delete_docs_by_source(chunk_id, index_path)
+
+    # Frame step/error exactly like tickets/queries so vectors share one space. Either
+    # may be absent → that side simply isn't embedded (search_dual handles one-sided).
+    step_embs  = [embedder.embed_one(f"Failed Step: {step}", embed_model)] if step  else [None]
+    error_embs = [embedder.embed_one(f"Error: {error}",      embed_model)] if error else [None]
+    meta = {"source": "doc", "source_id": chunk_id, "filename": "💡 User-submitted fix",
+            "chunk": 0, "step": step, "error": error, "kind": "user_fix"}
+    vectordb.add_docs_dual([chunk_id], step_embs, error_embs, [body[:4000]], [meta], index_path)
+
+    try:
+        import retrieval
+        retrieval.build_keyword_index(index_path)
+    except Exception as _e:
+        print(f"[BM25] keyword index refresh skipped: {_e}")
+
+    return {"ok": True, "indexed_id": chunk_id}
+
+
 # ── Jira ticket preview ───────────────────────────────────────────────────────
 
 def _ticket_to_text(issue) -> str:

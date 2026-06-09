@@ -202,6 +202,11 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
                 "_id":      h_id,
                 "filename": meta.get("filename", ""),
                 "chunk":    meta.get("chunk", 0),
+                # "user_fix" marks an approved user-submitted workaround so the UI can
+                # badge it. It's embedded on the exact failure's step+error, so it
+                # already scores ~1.0 and ranks at top via the normal doc path — no
+                # special boost needed here.
+                "kind":     meta.get("kind", ""),
                 "comment":  h["doc"],
                 "score":    score,
             })

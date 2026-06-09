@@ -313,6 +313,49 @@ def feedback_record(body: dict):
     return {"ok": True, "vote": rec["vote"]}
 
 
+# ── User-submitted workarounds: pending review + approval ─────────────────────
+
+@app.get("/api/suggestions/pending")
+def suggestions_pending():
+    """User-submitted fixes (from the in-Jira feedback fields) awaiting review."""
+    import suggestions as sg
+    cfg = load_config()
+    if not cfg["workaround_finder"].get("suggestions_enabled", True):
+        return {"ok": True, "pending": []}
+    return {"ok": True, "pending": sg.list_by_status("pending", cfg)}
+
+
+@app.post("/api/suggestions/{sid}/approve")
+def suggestions_approve(sid: str):
+    """Approve a pending suggestion → embed it into the searchable index as a
+    verified user fix, then mark it approved."""
+    import suggestions as sg
+    import ingest as ing
+    cfg = load_config()
+    rec = sg.get(sid, cfg)
+    if not rec:
+        raise HTTPException(404, "suggestion not found")
+    if rec.get("status") != "pending":
+        raise HTTPException(409, f"suggestion is already {rec.get('status')}")
+    res = ing.ingest_suggestion(rec.get("step", ""), rec.get("error", ""),
+                                rec.get("suggestion", ""), sid, cfg)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error", "could not index suggestion"))
+    sg.set_status(sid, "approved", cfg, indexed_id=res["indexed_id"])
+    return {"ok": True, "indexed_id": res["indexed_id"]}
+
+
+@app.post("/api/suggestions/{sid}/reject")
+def suggestions_reject(sid: str):
+    import suggestions as sg
+    cfg = load_config()
+    rec = sg.get(sid, cfg)
+    if not rec:
+        raise HTTPException(404, "suggestion not found")
+    sg.set_status(sid, "rejected", cfg)
+    return {"ok": True}
+
+
 # ── Jira auto-suggest: feedback links + poller ────────────────────────────────
 
 def _fb_page(title: str, body_html: str, tone: str = "ok") -> HTMLResponse:

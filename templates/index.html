@@ -177,6 +177,18 @@
       <div id="js-status" class="subtitle" style="margin-top:14px"></div>
       <div id="js-previews" style="margin-top:16px"></div>
     </div>
+
+    <!-- ── Pending user-submitted fixes (review queue) ────────── -->
+    <div class="config-section" style="margin-top:28px">
+      <h3>📝 Pending workaround suggestions <span id="ps-count" class="muted" style="font-weight:400"></span></h3>
+      <p class="subtitle">Fixes submitted by users through the Jira feedback fields (<b>Workaround
+        helpful? = No</b> + <b>Suggested workaround</b>). Approve to embed one as a searchable
+        💡 verified fix for that failure; reject to discard.</p>
+      <div class="ingest-actions" style="margin-bottom:12px">
+        <button class="btn-secondary" onclick="loadPendingSuggestions()">↻ Refresh</button>
+      </div>
+      <div id="ps-list"></div>
+    </div>
   </div>
 
   <!-- ── DOCS TAB ────────────────────────────────────────────── -->
@@ -463,9 +475,12 @@ async function doAsk() {
           <div class="source-comment">${escHtml(s.comment)}</div>
         </div>`;
       }
+      const docHead = s.kind === 'user_fix'
+        ? `<span class="fb-tag fb-tag-curated">💡 Verified fix</span> ${badge}`
+        : `📄 ${escHtml(s.filename)} ${badge}${fbTag}`;
       return `<div class="source-item ${isStrong ? 'source-strong' : ''}">
         <div class="source-header">
-          📄 ${escHtml(s.filename)} ${badge}${fbTag}
+          ${docHead}
           ${fbBtns}
         </div>
         <div class="source-comment">${escHtml(s.comment)}</div>
@@ -562,6 +577,7 @@ async function loadJiraSuggest() {
   document.getElementById('js-base-url').value    = r.public_base_url || window.location.origin;
   renderJiraSuggestStatus(r);
   loadJiraSuggestPreviews();
+  loadPendingSuggestions();
 }
 
 async function loadJiraSuggestPreviews() {
@@ -596,6 +612,49 @@ async function loadJiraSuggestPreviews() {
             : `<div class="muted" style="font-size:12px;margin-top:4px">Suggested comment not loaded yet — click ▶ Run now to fetch it.</div>`}
       </div>`;
     }).join('');
+}
+
+// ── Pending user-submitted suggestions (review queue) ───────────────────────
+async function loadPendingSuggestions() {
+  const el = document.getElementById('ps-list');
+  if (!el) return;
+  let r;
+  try { r = await get('/api/suggestions/pending'); } catch (e) { el.innerHTML = ''; return; }
+  const items = (r && r.pending) || [];
+  const cnt = document.getElementById('ps-count');
+  if (cnt) cnt.textContent = items.length ? `· ${items.length} pending` : '';
+  if (!items.length) {
+    el.innerHTML = '<div class="muted" style="font-size:13px">No pending suggestions.</div>';
+    return;
+  }
+  el.innerHTML = items.map(s => {
+    const ctx = [s.step ? 'Step: ' + s.step : '', s.error ? 'Error: ' + s.error : '']
+                  .filter(Boolean).join(' · ');
+    return `<div class="source-item" id="ps-${s.id}">
+      <div class="source-header">
+        ${s.source_key ? `<span class="source-summary">from ${escHtml(s.source_key)}</span>` : ''}
+        ${ctx ? `<span class="muted">${escHtml(ctx)}</span>` : ''}
+      </div>
+      <div class="source-comment">${escHtml(s.suggestion)}</div>
+      <div class="ingest-actions" style="margin-top:10px">
+        <button class="btn-primary"   onclick="reviewSuggestion('${s.id}','approve',this)">✓ Approve</button>
+        <button class="btn-secondary" onclick="reviewSuggestion('${s.id}','reject',this)">✕ Reject</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function reviewSuggestion(sid, action, btn) {
+  if (btn) { btn.disabled = true; }
+  const r = await post(`/api/suggestions/${sid}/${action}`, {});
+  if (r && r.ok) {
+    const card = document.getElementById('ps-' + sid);
+    if (card) card.remove();
+    loadPendingSuggestions();
+  } else {
+    if (btn) btn.disabled = false;
+    alert('Could not ' + action + ': ' + ((r && (r.detail || r.error)) || 'unknown error'));
+  }
 }
 
 function renderJiraSuggestStatus(r) {

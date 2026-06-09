@@ -26,7 +26,13 @@
     "jira_suggest_dry_run": true,
     "jira_suggest_minutes": 1,
     "jira_suggest_jql": "project = SAC AND status in (\"Waiting for support\",\"in progress\") and \"Reporting Area[Dropdown]\" = \"Order Fallout\"",
-    "public_base_url": "http://10.169.101.69:8010"
+    "public_base_url": "http://10.169.101.69:8010",
+    "suggestions_enabled": true,
+    "suggestions_path": "trackers/suggestions.json",
+    "jira_feedback_field": "",
+    "jira_suggestion_field": "",
+    "jira_feedback_yes": "Yes",
+    "jira_feedback_no": "No"
   },
   "llm": {
     "provider": "groq",

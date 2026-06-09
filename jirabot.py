@@ -162,12 +162,21 @@ def _links(cfg: dict, key: str, cand: str) -> tuple[str, str]:
 
 def _compose_comment(cfg: dict, key: str, cand: str, pct: int, answer: str) -> str:
     up, down = _links(cfg, key, cand)
+    wf = cfg["workaround_finder"]
+    # Universal feedback path for users without app access: native Jira fields on this
+    # ticket. Only advertised when those fields are configured.
+    fields_line = ""
+    if wf.get("jira_feedback_field") or wf.get("jira_suggestion_field"):
+        fields_line = ("\n_No app access?_ Set *Workaround helpful?* on this ticket — "
+                       "*Yes* to confirm, or *No* and put the correct steps in "
+                       "*Suggested workaround*. It's picked up automatically.\n")
     return (
         f"*💡 Suggested workaround* — matched {cand} · {pct}% confidence\n\n"
         f"{answer}\n\n"
         f"{WARNING}\n\n"
         "----\n"
-        f"*Was this helpful?*  [👍 Yes, good fix|{up}]    |    [👎 No, improve it|{down}]\n\n"
+        f"*Was this helpful?*  [👍 Yes, good fix|{up}]    |    [👎 No, improve it|{down}]\n"
+        f"{fields_line}\n"
         f"_🤖 Auto-suggested by FalloutAssist · {MARKER}_"
     )
 
@@ -226,6 +235,116 @@ def looks_like_nonfix(text: str) -> bool:
 
 # ── Poll + post ────────────────────────────────────────────────────────────────
 
+# ── In-Jira feedback harvesting ────────────────────────────────────────────────
+# Users without app-server access give feedback through native Jira fields on the
+# ticket: a "Workaround helpful?" single-select (Yes/No) and a "Suggested workaround"
+# text field. The bot reads them on its existing poll — pull-only, nothing inbound to
+# the restricted subnet. A 👎 + a fix becomes a PENDING suggestion (suggestions.py),
+# approved in the in-app review panel.
+
+def _fb_fields(cfg: dict) -> tuple[str, str]:
+    wf = cfg["workaround_finder"]
+    return (wf.get("jira_feedback_field", "").strip(),
+            wf.get("jira_suggestion_field", "").strip())
+
+
+def _adf_text(node) -> str:
+    """Best-effort plain text out of a Jira Cloud ADF (rich-text) value."""
+    if isinstance(node, dict):
+        if node.get("type") == "text":
+            return node.get("text", "")
+        return " ".join(_adf_text(c) for c in node.get("content", []))
+    if isinstance(node, list):
+        return " ".join(_adf_text(c) for c in node)
+    return ""
+
+
+def _field_value(issue, field_id: str) -> str:
+    """A single-select custom field's chosen option as plain text ('' if unset)."""
+    try:
+        v = getattr(issue.fields, field_id, None)
+    except Exception:
+        return ""
+    if v is None:
+        return ""
+    val = getattr(v, "value", None) or getattr(v, "name", None)
+    return str(val if val is not None else v).strip()
+
+
+def _field_text(issue, field_id: str) -> str:
+    """A text custom field as a plain string (handles Cloud ADF dict values)."""
+    try:
+        v = getattr(issue.fields, field_id, None)
+    except Exception:
+        return ""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, dict):
+        return _adf_text(v).strip()
+    return str(v).strip()
+
+
+def harvest_feedback(issue, st: dict, cfg: dict) -> tuple[dict, bool]:
+    """Read the in-Jira feedback fields on `issue` → a vote (+ a pending suggestion
+    when a fix is supplied). Idempotent via a snapshot stored in state. Returns
+    (state_record, changed) — the caller persists it when changed."""
+    wf = cfg["workaround_finder"]
+    if not wf.get("suggestions_enabled", True):
+        return st, False
+    fb_field, sug_field = _fb_fields(cfg)
+    if not fb_field and not sug_field:
+        return st, False
+
+    helpful = _field_value(issue, fb_field) if fb_field else ""
+    fix     = _field_text(issue, sug_field) if sug_field else ""
+    if not helpful and not fix:
+        return st, False
+
+    snap = {"helpful": helpful,
+            "fix_md5": hashlib.md5(fix.encode("utf-8")).hexdigest() if fix else ""}
+    if (st or {}).get("fb") == snap:
+        return st, False   # this exact feedback already processed
+
+    import feedback as fb
+    import suggestions as sg
+    import ingest as ing
+
+    # Failure context + the candidate we suggested. Derive step/error from the ticket
+    # (LLM-free) when we never matched/commented on it.
+    step = (st or {}).get("step", "")
+    error = (st or {}).get("error", "")
+    if not step and not error:
+        try:
+            from search import _extract_fields
+            step, error, _ = _extract_fields(ing._ticket_to_text(issue))
+        except Exception:
+            pass
+    cand = (st or {}).get("suggested_key", "")
+    kind = (st or {}).get("cand_kind", "ticket")
+
+    yes = (wf.get("jira_feedback_yes", "Yes") or "Yes").strip().lower()
+    no  = (wf.get("jira_feedback_no",  "No")  or "No").strip().lower()
+    h   = helpful.strip().lower()
+
+    if h == yes:
+        if cand:
+            fb.record("up", kind, cand, step, error, issue.key, cfg)
+            print(f"[JIRA-SUGGEST] {issue.key}: field vote UP -> boosted {cand}")
+    elif h == no or fix:
+        if cand:
+            fb.record("down", kind, cand, step, error, issue.key, cfg)
+        if fix:
+            sg.add(step, error, source_key=issue.key, disliked_key=cand,
+                   suggestion=fix, cfg=cfg)
+            print(f"[JIRA-SUGGEST] {issue.key}: field vote DOWN + fix -> pending suggestion")
+
+    new_st = dict(st or {})
+    new_st["fb"] = snap
+    return new_st, True
+
+
 def run_once(cfg: dict) -> dict:
     """One pass over the inflow JQL. Returns a small summary dict."""
     import ingest as ing
@@ -239,10 +358,13 @@ def run_once(cfg: dict) -> dict:
         return {"ok": False, "error": "jira_suggest_jql not configured"}
 
     with _lock:
+        fields = "summary,description,comment,status,updated"
+        for fid in _fb_fields(cfg):
+            if fid:
+                fields += f",{fid}"
         try:
             jira   = ing._get_jira(cfg)
-            issues = ing._search_jql(jira, jql,
-                                     "summary,description,comment,status,updated")
+            issues = ing._search_jql(jira, jql, fields)
         except Exception as e:
             print(f"[JIRA-SUGGEST] search failed: {str(e)[:160]}")
             return {"ok": False, "error": str(e)[:200]}
@@ -254,6 +376,16 @@ def run_once(cfg: dict) -> dict:
         for issue in issues:
             key = issue.key
             st  = state.get(key)
+
+            # Harvest any in-Jira feedback the user left (runs BEFORE the idempotency
+            # skips below — feedback lands precisely on tickets we've already commented
+            # on, which those skips would otherwise short-circuit past).
+            try:
+                st, changed = harvest_feedback(issue, st, cfg)
+                if changed:
+                    state[key] = st
+            except Exception as e:
+                print(f"[JIRA-SUGGEST] harvest failed for {key}: {str(e)[:120]}")
 
             # Idempotency: a live comment already exists for this ticket.
             if st and st.get("comment_id"):
