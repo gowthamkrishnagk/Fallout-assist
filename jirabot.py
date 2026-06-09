@@ -35,6 +35,14 @@ _lock       = threading.Lock()
 
 MARKER = "FA-SUGGESTION"   # hidden token in the comment footer → idempotency backup
 
+# Caution baked into every auto-suggestion. This is a reference fix from a PAST similar
+# ticket — the steps (esp. destructive ones like NW cleanup / cancel / delete) must be
+# scoped to THIS ticket's own MSISDN/order before acting, or they hit the wrong targets.
+WARNING = ("⚠️ *Verify before acting* — this is an auto-suggested fix from a past similar "
+           "ticket. Confirm the exact scope (the specific MSISDN/order on THIS ticket) before "
+           "applying any step, especially destructive ones like NW cleanup. Do not apply to "
+           "other MSISDNs.")
+
 
 # ── State ──────────────────────────────────────────────────────────────────────
 
@@ -157,6 +165,7 @@ def _compose_comment(cfg: dict, key: str, cand: str, pct: int, answer: str) -> s
     return (
         f"*💡 Suggested workaround* — matched {cand} · {pct}% confidence\n\n"
         f"{answer}\n\n"
+        f"{WARNING}\n\n"
         "----\n"
         f"*Was this helpful?*  [👍 Yes, good fix|{up}]    |    [👎 No, improve it|{down}]\n\n"
         f"_🤖 Auto-suggested by FalloutAssist · {MARKER}_"

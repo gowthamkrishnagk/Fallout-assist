@@ -801,6 +801,8 @@ def fetch_ticket_text(ticket_id: str, cfg: dict) -> str:
         parts = []
         if meta.get("step"):
             parts.append(f"Failed Step: {meta['step']}")
+        if meta.get("description"):     # carries Order Reason / Order Type labels
+            parts.append(meta["description"])
         if meta.get("error"):
             parts.append(f"Error: {meta['error']}")
         if parts:

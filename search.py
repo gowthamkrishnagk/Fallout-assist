@@ -86,6 +86,12 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     # Hybrid parse: regex for labeled input, LLM fallback for free-form prose
     step, error = parse_input(query, cfg)
 
+    # Categorical disambiguators (Order Type / Order Reason). Pulled from the query
+    # text when present (the Jira bot's query carries them; free-form input may not).
+    # Used as a keyword signal (BM25) + a tie-breaker boost — never an embedding leg.
+    order_type   = _grab_field(query, "Order Type")
+    order_reason = _grab_field(query, "Order Reason")
+
     # Build embeddings only for the fields actually present → dynamic routing in search_dual
     step_emb  = embedder.embed_one(f"Failed Step: {step}", embed_model) if step else None
     error_emb = embedder.embed_one(f"Error: {error}", embed_model)       if error else None
@@ -108,8 +114,10 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     # cosine so the threshold/display stay truthful. LLM-free, so it costs no quota.
     rrf = {}
     if wf.get("hybrid_enabled", True):
+        kw_extra = " ".join(p for p in (order_type, order_reason) if p)
         rrf, all_hits = _hybrid_augment(step, error, step_emb, error_emb,
-                                        all_hits, index_path, wf, err_weight, err_floor)
+                                        all_hits, index_path, wf, err_weight, err_floor,
+                                        extra_query=kw_extra)
 
     # Graph expansion: pull in sibling tickets that share this failure's signature
     # (same step+error) or are pointer-linked, even when their comment wording
@@ -215,6 +223,11 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     if rrf:
         _apply_hybrid(candidates, rrf, wf)
 
+    # Categorical tie-breaker: among candidates that tie on step+error, lift the one
+    # whose Order Type / Order Reason matches the query — the right fix for THIS kind
+    # of order (a Disconnect fix is wrong for a New order).
+    _apply_order_boost(candidates, order_type, order_reason, wf)
+
     # Order matches of similar strength (same 0.01 score bucket — e.g. the many
     # tickets that tie at 1.0 for an identical error) by, in priority:
     #   1. feedback-adjusted match strength (likes/dislikes reorder ties)
@@ -245,7 +258,8 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
 
 
 def _hybrid_augment(step: str, error: str, step_emb, error_emb, vector_hits: list,
-                    index_path: str, wf: dict, err_weight: float, err_floor: float):
+                    index_path: str, wf: dict, err_weight: float, err_floor: float,
+                    extra_query: str = ""):
     """Run BM25 keyword search, fuse it with the vector hits (RRF), and pull in
     keyword-only hits the vector pool missed — scoring them with the same dual
     cosine so they're directly comparable to the vector candidates.
@@ -254,7 +268,8 @@ def _hybrid_augment(step: str, error: str, step_emb, error_emb, vector_hits: lis
     is unavailable (rank-bm25 missing / empty KB) it returns ({}, vector_hits)."""
     import retrieval
     top_k   = wf.get("top_k", 10)
-    kw_hits = retrieval.keyword_search(step, error, max(top_k * 3, 30), index_path)
+    kw_hits = retrieval.keyword_search(step, error, max(top_k * 3, 30), index_path,
+                                       extra=extra_query)
     if not kw_hits:
         return {}, vector_hits
 
@@ -340,6 +355,32 @@ def _apply_hybrid(candidates: list, rrf: dict, wf: dict):
         adj = round((r / max_rrf) * weight, 4) if r else 0.0
         c["hybrid_adj"] = adj
         c["rank_score"] = c.get("rank_score", c["score"]) + adj
+
+
+def _apply_order_boost(candidates: list, q_type: str, q_reason: str, wf: dict):
+    """Tie-breaker: nudge a candidate up when its Order Type / Order Reason match the
+    query's. These are low-cardinality CATEGORICAL fields — useless as a weighted
+    embedding (a 384-dim vector of 'Modify' ≈ 'New'), but decisive among the many
+    candidates that tie on the SAME step+error: a Disconnect fix is wrong for a New
+    order. Bounded and additive like the feedback/hybrid nudges, so it reorders ties
+    and can lift a near-miss across threshold, but can't manufacture a match from an
+    unrelated ticket. No-op when the query carries neither field."""
+    if not q_type and not q_reason:
+        return
+    w_type   = wf.get("order_match_weight", 0.05)
+    w_reason = w_type * 0.6   # Order Type is the sharper discriminator of the two
+    for c in candidates:
+        if c.get("type") != "ticket":
+            continue
+        desc = c.get("description", "")
+        adj  = 0.0
+        if q_type and _order_eq(q_type, _grab_field(desc, "Order Type")):
+            adj += w_type
+        if q_reason and _order_eq(q_reason, _grab_field(desc, "Order Reason")):
+            adj += w_reason
+        if adj:
+            c["order_adj"]  = round(adj, 4)
+            c["rank_score"] = c.get("rank_score", c["score"]) + adj
 
 
 def _apply_feedback(step: str, error: str, candidates: list, cfg: dict, threshold: float):
@@ -433,6 +474,32 @@ def _llm_rerank(step: str, error: str, candidates: list, cfg: dict) -> list:
     except Exception as e:
         print(f"[RERANK] skipped ({e}) — keeping cosine order")
         return candidates
+
+
+def _grab_field(text: str, field: str) -> str:
+    """Pull a single labeled categorical field (e.g. 'Order Type', 'Order Reason')
+    out of query text or a candidate's stored description. Mirrors ingest's
+    _extract_description_fields matcher so the query and the stored chunk read a
+    field the same way. '' when absent or a bare number (an id, not a category)."""
+    m = re.search(
+        rf'(?:^|\n|\|)\s*\*?{re.escape(field)}\*?\s*[:\|]\s*\*?([^*\n\|]{{1,80}}?)\*?\s*(?:\||$|\n)',
+        text or "", re.IGNORECASE | re.MULTILINE
+    )
+    if not m:
+        return ""
+    val = m.group(1).strip().strip('*').strip()
+    if not val or re.match(r'^\d+$', val):
+        return ""
+    return _clean_query(val)
+
+
+def _order_eq(a: str, b: str) -> bool:
+    """Categorical equality for Order Type / Order Reason — exact after normalization,
+    or one's WORD set is a subset of the other's (tolerates 'Modify' vs 'Modify
+    Service' without the substring trap where 'New' would match 'Renewal')."""
+    ta = set(re.findall(r'[a-z0-9]+', a.lower()))
+    tb = set(re.findall(r'[a-z0-9]+', b.lower()))
+    return bool(ta) and bool(tb) and (ta <= tb or tb <= ta)
 
 
 def _extract_fields(text: str):

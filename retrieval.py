@@ -16,7 +16,12 @@ import re
 import vectordb
 
 _TOKEN = re.compile(r"[a-z0-9]+")
-_cache: dict = {}   # index_path -> {count, bm25, ids, doc_by_id, meta_by_id, source_by_id}
+_cache: dict = {}   # index_path -> {count, schema, bm25, ids, doc_by_id, meta_by_id, source_by_id}
+
+# Bump when _entry_text changes what a chunk is indexed under, so a running process
+# rebuilds the keyword index even though the chunk COUNT is unchanged (a code change,
+# not a data change, won't move the count the cache otherwise keys on).
+_ENTRY_SCHEMA = 2
 
 
 def _tokenize(text: str) -> list[str]:
@@ -25,9 +30,12 @@ def _tokenize(text: str) -> list[str]:
 
 def _entry_text(doc: str, meta: dict) -> str:
     """The text a chunk is indexed under for keyword search: its failed step, error,
-    summary, and resolution comment — the same fields vector search embeds."""
+    summary, resolution comment, and the structured description fields (Order Reason /
+    Order Type / Sub Type …) — so an exact categorical match (e.g. Order Type) is a
+    keyword signal RRF can lift, which embeddings blur for short category labels."""
     parts = [meta.get("step", ""), meta.get("error", ""),
-             meta.get("summary", ""), meta.get("comment_body") or doc or ""]
+             meta.get("summary", ""), meta.get("description", ""),
+             meta.get("comment_body") or doc or ""]
     return " ".join(p for p in parts if p)
 
 
@@ -50,7 +58,7 @@ def _build(index_path: str, count: int) -> dict | None:
         source_by_id[c["id"]] = c["source"]
     if not ids:
         return None
-    data = {"count": count, "bm25": BM25Okapi(corpus), "ids": ids,
+    data = {"count": count, "schema": _ENTRY_SCHEMA, "bm25": BM25Okapi(corpus), "ids": ids,
             "doc_by_id": doc_by_id, "meta_by_id": meta_by_id, "source_by_id": source_by_id}
     print(f"[BM25] built keyword index over {len(ids)} chunks")
     return data
@@ -61,7 +69,7 @@ def _get(index_path: str) -> dict | None:
     that adds/removes tickets is reflected without a manual refresh)."""
     count = vectordb.count(index_path)
     cached = _cache.get(index_path)
-    if cached and cached["count"] == count:
+    if cached and cached["count"] == count and cached.get("schema") == _ENTRY_SCHEMA:
         return cached
     data = _build(index_path, count)
     if data is not None:
@@ -78,10 +86,11 @@ def build_keyword_index(index_path: str) -> int:
     return len(data["ids"]) if data else 0
 
 
-def keyword_search(step: str, error: str, top_k: int, index_path: str) -> list[dict]:
-    """BM25 hits for the query's step+error, best first, as
-    {id, doc, meta, source, kw_score, kw_rank}. [] if the index is empty/unavailable
-    or the query has no usable tokens."""
+def keyword_search(step: str, error: str, top_k: int, index_path: str,
+                   extra: str = "") -> list[dict]:
+    """BM25 hits for the query's step+error (plus any `extra` terms, e.g. the query's
+    Order Type / Order Reason), best first, as {id, doc, meta, source, kw_score,
+    kw_rank}. [] if the index is empty/unavailable or the query has no usable tokens."""
     try:
         data = _get(index_path)
     except Exception as e:
@@ -89,7 +98,7 @@ def keyword_search(step: str, error: str, top_k: int, index_path: str) -> list[d
         return []
     if not data:
         return []
-    query = _tokenize(f"{step} {error}")
+    query = _tokenize(f"{step} {error} {extra}")
     if not query:
         return []
     scores = data["bm25"].get_scores(query)
