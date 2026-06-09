@@ -184,6 +184,8 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
                 "author":      author,
                 "comment":     comment,
                 "description": meta.get("description", ""),
+                "order_type":  meta.get("order_type", ""),
+                "order_reason": meta.get("order_reason", ""),
                 "error":       meta.get("error", ""),
                 "step":        meta.get("step", ""),
                 "score":       score,
@@ -223,10 +225,11 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     if rrf:
         _apply_hybrid(candidates, rrf, wf)
 
-    # Categorical tie-breaker: among candidates that tie on step+error, lift the one
-    # whose Order Type / Order Reason matches the query — the right fix for THIS kind
-    # of order (a Disconnect fix is wrong for a New order).
-    _apply_order_boost(candidates, order_type, order_reason, wf)
+    # Categorical match/mismatch: among candidates that tie on step+error, lift the one
+    # whose Order Type / Order Reason matches the query and push down one that
+    # contradicts it — the right fix for THIS kind of order (a Disconnect fix is wrong
+    # for a New order).
+    _apply_order_match(candidates, order_type, order_reason, wf)
 
     # Order matches of similar strength (same 0.01 score bucket — e.g. the many
     # tickets that tie at 1.0 for an identical error) by, in priority:
@@ -357,27 +360,45 @@ def _apply_hybrid(candidates: list, rrf: dict, wf: dict):
         c["rank_score"] = c.get("rank_score", c["score"]) + adj
 
 
-def _apply_order_boost(candidates: list, q_type: str, q_reason: str, wf: dict):
-    """Tie-breaker: nudge a candidate up when its Order Type / Order Reason match the
-    query's. These are low-cardinality CATEGORICAL fields — useless as a weighted
-    embedding (a 384-dim vector of 'Modify' ≈ 'New'), but decisive among the many
-    candidates that tie on the SAME step+error: a Disconnect fix is wrong for a New
-    order. Bounded and additive like the feedback/hybrid nudges, so it reorders ties
-    and can lift a near-miss across threshold, but can't manufacture a match from an
-    unrelated ticket. No-op when the query carries neither field."""
+def _apply_order_match(candidates: list, q_type: str, q_reason: str, wf: dict):
+    """Categorical match/mismatch on Order Type / Order Reason. These are low-cardinality
+    CATEGORICAL fields — useless as a weighted embedding (a 384-dim vector of 'Modify' ≈
+    'New'), but decisive among the many candidates that tie on the SAME step+error: a
+    Disconnect fix is wrong for a New order.
+
+      match    (both sides present, equal)   → +order_match_weight   (lift the right kind)
+      mismatch (both sides present, unequal) → -order_mismatch_penalty (sink the wrong kind)
+      either side absent                     → no-op (absence is not a contradiction, so a
+                                               free-form query with no Order Type is untouched)
+
+    Bounded and additive like the feedback/hybrid nudges, applied to rank_score only — the
+    raw score and display threshold stay truthful. A mismatch demotes (strong→context, or
+    lower in context) but never erases. The penalty is larger than the boost so a
+    contradicting category outweighs an incidental match elsewhere.
+
+    Candidate categories come from the dedicated order_type/order_reason metadata, falling
+    back to parsing the description blob so this still works on an index that predates the
+    dedicated fields (i.e. not yet re-ingested)."""
     if not q_type and not q_reason:
         return
-    w_type   = wf.get("order_match_weight", 0.05)
-    w_reason = w_type * 0.6   # Order Type is the sharper discriminator of the two
+    w_type    = wf.get("order_match_weight", 0.05)
+    p_type    = wf.get("order_mismatch_penalty", 0.12)
+    w_reason  = w_type * 0.6   # Order Type is the sharper discriminator of the two
+    p_reason  = p_type * 0.6
+
+    def _cand(c, field, label):
+        return c.get(field) or _grab_field(c.get("description", ""), label)
+
     for c in candidates:
         if c.get("type") != "ticket":
             continue
-        desc = c.get("description", "")
-        adj  = 0.0
-        if q_type and _order_eq(q_type, _grab_field(desc, "Order Type")):
-            adj += w_type
-        if q_reason and _order_eq(q_reason, _grab_field(desc, "Order Reason")):
-            adj += w_reason
+        adj = 0.0
+        c_type = _cand(c, "order_type", "Order Type")
+        if q_type and c_type:
+            adj += w_type if _order_eq(q_type, c_type) else -p_type
+        c_reason = _cand(c, "order_reason", "Order Reason")
+        if q_reason and c_reason:
+            adj += w_reason if _order_eq(q_reason, c_reason) else -p_reason
         if adj:
             c["order_adj"]  = round(adj, 4)
             c["rank_score"] = c.get("rank_score", c["score"]) + adj

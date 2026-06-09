@@ -119,11 +119,11 @@ def _clean_for_embed(text: str) -> str:
     return clean_text(text)
 
 
-def _extract_description_fields(issue) -> str:
-    """Extract structured fields (Order Reason, Order Type, Step, Error Description…)
-    from the ticket description. Handles Jira wiki markup bold (*Field:*) and plain text."""
-    desc = getattr(issue.fields, 'description', '') or ''
-    extracted = []
+def _parse_structured_fields(desc: str) -> dict:
+    """{field: value} for the structured labels found in a ticket description.
+    Handles Jira wiki markup bold (*Field:*), plain text, and table cells. Pure
+    numbers are skipped (they're order/account IDs, not meaningful text)."""
+    out: dict = {}
     for field in _STRUCTURED_FIELDS:
         # Matches: *Order Reason:* value  |  Order Reason: value  |  | Order Reason | value |
         m = re.search(
@@ -132,10 +132,17 @@ def _extract_description_fields(issue) -> str:
         )
         if m:
             val = m.group(1).strip().strip('*').strip()
-            # Skip pure numbers (they're order/account IDs, not meaningful text)
             if val and not re.match(r'^\d+$', val):
-                extracted.append(f"{field}: {val}")
-    return '\n'.join(extracted)
+                out[field] = val
+    return out
+
+
+def _extract_description_fields(issue) -> str:
+    """Extract structured fields (Order Reason, Order Type, Step, Error Description…)
+    from the ticket description as a joined "Field: value" string for embedding/display."""
+    desc   = getattr(issue.fields, 'description', '') or ''
+    fields = _parse_structured_fields(desc)
+    return '\n'.join(f"{k}: {v}" for k, v in fields.items())
 
 
 # Authors whose comments are automated noise — never real workarounds
@@ -427,9 +434,12 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                     continue
 
                 reindexed += 1
-                error_ctx   = _extract_error_context(issue)
-                clean_sum   = _clean_for_embed(summary)
-                desc_fields = _extract_description_fields(issue)
+                error_ctx    = _extract_error_context(issue)
+                clean_sum    = _clean_for_embed(summary)
+                struct       = _parse_structured_fields(getattr(issue.fields, 'description', '') or '')
+                desc_fields  = '\n'.join(f"{k}: {v}" for k, v in struct.items())
+                order_type   = struct.get("Order Type", "")
+                order_reason = struct.get("Order Reason", "")
 
                 # Extract step name from cleaned summary for focused embedding
                 step_match = re.search(r'Failed\s+Step:\s*([^\n]{5,80}?)(?:\s*$)', clean_sum, re.IGNORECASE)
@@ -471,6 +481,8 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                         "step":           step_name,
                         "error":          error_ctx[:200] if error_ctx else "",
                         "description":    desc_fields[:500] if desc_fields else "",
+                        "order_type":     order_type,
+                        "order_reason":   order_reason,
                         "status":         issue.fields.status.name,
                         "url":            url,
                         "assignee":       assignee_name,
