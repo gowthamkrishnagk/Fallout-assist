@@ -218,6 +218,19 @@ def ingest_status():
     return s
 
 
+@app.get("/api/scorecard")
+def scorecard_status():
+    """Latest auto-graded accuracy (self-test, feedback-free) + recent history for a
+    sparkline. Refreshes automatically after each ingest."""
+    import json, scorecard
+    cfg = load_config()
+    try:
+        hist = json.loads(scorecard._history_path(cfg).read_text(encoding="utf-8"))
+    except Exception:
+        hist = []
+    return {"ok": True, "latest": (hist[-1] if hist else None), "history": hist[-30:]}
+
+
 @app.get("/api/ingest/schedule")
 def ingest_schedule_get():
     """Current background auto-ingest schedule."""

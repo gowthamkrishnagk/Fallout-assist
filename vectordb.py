@@ -199,12 +199,15 @@ def _search_dual(step_col_name, error_col_name, step_emb, error_emb, top_k,
             score = s                     # step-only → 100% step
         else:
             score = e                     # error-only → 100% error
-        combined.append((id_, score))
+        # Carry the per-side cosines so the caller can swap the error leg for a
+        # vectorless lexical score (search.py) without re-querying.
+        combined.append((id_, score, s, e))
 
     combined.sort(key=lambda x: x[1], reverse=True)
     return [
-        {"id": id_, "doc": doc_map[id_], "meta": meta_map[id_], "score": round(score, 3)}
-        for id_, score in combined[:top_k]
+        {"id": id_, "doc": doc_map[id_], "meta": meta_map[id_], "score": round(score, 3),
+         "step_score": round(s, 3), "error_score": round(e, 3)}
+        for id_, score, s, e in combined[:top_k]
         if id_ in doc_map
     ]
 
@@ -248,10 +251,13 @@ def all_chunks(index_path: str) -> list[dict]:
 def scores_for_ids(ids: list[str], step_emb, error_emb, index_path: str,
                    source: str = "ticket", error_weight: float = 0.65,
                    error_floor: float = 0.0) -> dict:
-    """Cosine score (same dual-weighted formula as _search_dual) for a SPECIFIC set
-    of chunk ids — used to give keyword-only hits (found by BM25 but outside the
-    vector candidate pool) an honest, comparable score for the threshold/display.
-    MiniLM vectors are unit-length, so cosine = dot product."""
+    """Per-side + combined cosine (same dual-weighted formula as _search_dual) for a
+    SPECIFIC set of chunk ids — used to give keyword-only / graph hits (found outside
+    the vector candidate pool) an honest, comparable score for the threshold/display.
+    MiniLM vectors are unit-length, so cosine = dot product.
+
+    Returns {id: {"score", "step_score", "error_score"}} so the caller can swap the
+    error leg for a vectorless lexical score, just like search_dual's hits."""
     if not ids:
         return {}
     cols = TICKET_COLS if source == "ticket" else DOC_COLS
@@ -287,7 +293,8 @@ def scores_for_ids(ids: list[str], step_emb, error_emb, index_path: str,
             score = e
         else:
             continue
-        out[id_] = round(score, 3)
+        out[id_] = {"score": round(score, 3),
+                    "step_score": round(s, 3), "error_score": round(e, 3)}
     return out
 
 

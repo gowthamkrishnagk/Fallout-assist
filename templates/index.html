@@ -115,6 +115,10 @@
       <div class="status-row"><span>Jira tickets</span><strong id="st-tickets">—</strong></div>
       <div class="status-row"><span>Documents</span><strong id="st-docs">—</strong></div>
       <div class="status-row"><span>Last Jira sync</span><strong id="st-sync">—</strong></div>
+      <div class="status-row" title="Auto-graded after each ingest: of past tickets, how often a same-failure ticket is ranked #1 (and top-3). Uses no user feedback.">
+        <span>Match accuracy <span class="muted" style="font-size:12px">(self-test)</span></span>
+        <strong id="st-accuracy">—</strong>
+      </div>
     </div>
 
     <!-- ── Auto-suggest on inflow tickets ─────────────────────── -->
@@ -539,6 +543,7 @@ async function loadIngestStatus() {
   document.getElementById('st-docs').textContent    = r.doc_count    ?? '—';
   document.getElementById('st-sync').textContent    = r.last_jira_sync ? new Date(r.last_jira_sync).toLocaleString() : 'Never';
   document.getElementById('kb-status').textContent  = `KB: ${r.total_chunks ?? 0} chunks`;
+  loadScorecard();
 
   const busy = !!r.running;
   document.querySelectorAll('#tab-ingest .ingest-actions button').forEach(b => b.disabled = busy);
@@ -546,6 +551,20 @@ async function loadIngestStatus() {
   document.getElementById('ingest-progress').classList.toggle('hidden', !busy);
   document.getElementById('run-status').textContent = busy ? '🔄 Ingesting...' : '';
   if (busy) setTimeout(loadIngestStatus, 3000);
+}
+
+// Latest auto-graded match accuracy (self-test, feedback-free). Refreshes after ingest.
+async function loadScorecard() {
+  const el = document.getElementById('st-accuracy');
+  if (!el) return;
+  try {
+    const r = await get('/api/scorecard');
+    const s = r && r.latest;
+    if (!s) { el.textContent = 'not measured yet'; return; }
+    const when = s.ts ? new Date(s.ts + 'Z').toLocaleDateString() : '';
+    el.textContent = `${(s.hit1 * 100).toFixed(0)}% top-1 · ${(s.hit3 * 100).toFixed(0)}% top-3`;
+    el.title = `${s.mode} mode, ${s.tested} tickets, ${when}`;
+  } catch (e) { el.textContent = '—'; }
 }
 
 async function loadSchedule() {

@@ -535,6 +535,18 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                          "tickets":      known,
                          "jira_count":   len(known),
                          "ticket_count": total})
+
+            # Auto-grade accuracy on the freshly-updated index (background, best-effort)
+            # so the self-test score refreshes whenever the data changes — no manual run.
+            if (len(ids) or pruned) and cfg["workaround_finder"].get("selftest_after_ingest", True):
+                def _grade():
+                    try:
+                        import scorecard
+                        scorecard.log_selftest(cfg)
+                    except Exception as _e:
+                        print(f"[SELFTEST] post-ingest grade skipped: {_e}")
+                threading.Thread(target=_grade, daemon=True).start()
+
             return {"ok": True, "indexed": len(ids), "skipped": skipped,
                     "up_to_date": up_to_date, "pruned": pruned,
                     "tickets_indexed": reindexed}

@@ -56,7 +56,8 @@ def _resolution_quality(c: dict) -> float:
     return score
 
 
-def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
+def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset(),
+                     offline: bool = False) -> dict:
     """
     Returns:
       {
@@ -69,6 +70,10 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     `exclude_keys` is a set of ticket keys to drop from the results — used by the
     Jira 👎 "improve" loop to skip workarounds already rejected on a ticket so the
     re-match advances to a genuinely different, properly-matched fix.
+
+    `offline=True` skips the live-Jira lookup used to resolve a pointer comment whose
+    target isn't indexed (such a candidate is just dropped). Used by the self-test /
+    any batch run so it stays fast and needs no network / API token.
     """
     exclude_keys = {k.upper() for k in exclude_keys}
     wf          = cfg["workaround_finder"]
@@ -81,7 +86,12 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
     # whose error is below err_floor is dropped: a wrong error is a different
     # failure, not a weak match (step-only matches must not surface).
     err_weight  = wf.get("error_weight", 0.65)
-    err_floor   = wf.get("error_floor", 0.55)
+    # error_match: "lexical" (default) decides the error leg vectorlessly — a different
+    # error CODE is a different failure (see errormatch.py). In that mode the vector
+    # error no longer GATES recall (err_floor → 0): vectors cast a wide net, the
+    # lexical layer does the gating. "vector" restores the old cosine-floor behavior.
+    err_mode    = wf.get("error_match", "lexical")
+    err_floor   = 0.0 if err_mode == "lexical" else wf.get("error_floor", 0.55)
 
     # Hybrid parse: regex for labeled input, LLM fallback for free-form prose
     step, error = parse_input(query, cfg)
@@ -162,6 +172,8 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
                     url, author  = ref_meta.get("url", ""), ref_meta.get("comment_author", "")
                     meta         = ref_meta
                 else:
+                    if offline:
+                        continue          # offline/self-test: no live Jira lookups
                     # Not indexed → follow to Jira live for the real resolution.
                     import ingest as ing
                     fetched = ing.fetch_ticket_resolution(ref, cfg)
@@ -189,14 +201,14 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
                 "error":       meta.get("error", ""),
                 "step":        meta.get("step", ""),
                 "score":       score,
+                "step_score":  h.get("step_score"),
                 "updated_ts":  meta.get("updated_ts", 0),
             })
         else:
-            # Drop unrelated docs entirely: a document below the match threshold
-            # is never shown. We don't dump the whole document body as a weak
-            # "reference" — that just produces unrelated answers.
-            if score < threshold:
-                continue
+            # Docs are scored on the same (step, error) basis as tickets, so the
+            # vectorless error leg applies here too — carry step/error + step_score.
+            # The weak-doc drop (a doc below threshold is never shown as a vague
+            # "reference") happens AFTER the lexical rescore, since the score moves.
             candidates.append({
                 "type":     "doc",
                 "_id":      h_id,
@@ -208,8 +220,24 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset()) -> dict:
                 # special boost needed here.
                 "kind":     meta.get("kind", ""),
                 "comment":  h["doc"],
+                "error":    meta.get("error", ""),
+                "step":     meta.get("step", ""),
                 "score":    score,
+                "step_score": h.get("step_score"),
             })
+
+    # Vectorless decision: among the candidates the vector net gathered, re-score the
+    # step + error legs lexically (input is copied from the system, never paraphrased,
+    # so exact comparison is sharper than a blurred embedding) and drop any whose error
+    # CODE contradicts the query's. No-op in "vector" mode or when the query has neither
+    # field. Done before everything below so the lexical score flows through re-rank /
+    # feedback / threshold split untouched.
+    candidates = _lexical_rescore(step, error, candidates, wf, err_weight, err_mode)
+
+    # Weak-doc drop: a doc below the match threshold is never shown as a vague
+    # "reference". Deferred to here because the lexical rescore moves the score.
+    candidates = [c for c in candidates
+                  if c.get("type") != "doc" or c["score"] >= threshold]
 
     # LLM relevance re-rank: drop semantic near-misses the cosine score lets
     # through, keeping only candidates about the SAME failure. No-op if disabled
@@ -294,9 +322,11 @@ def _hybrid_augment(step: str, error: str, step_emb, error_emb, vector_hits: lis
         sc  = vectordb.scores_for_ids(ids, step_emb, error_emb, index_path,
                                       source=src, error_weight=err_weight, error_floor=err_floor)
         by_id = {h["id"]: h for h in only}
-        for id_, score in sc.items():
+        for id_, d in sc.items():
             h = by_id[id_]
-            extra.append({"id": id_, "doc": h["doc"], "meta": h["meta"], "score": score})
+            extra.append({"id": id_, "doc": h["doc"], "meta": h["meta"],
+                          "score": d["score"], "step_score": d["step_score"],
+                          "error_score": d["error_score"]})
     return rrf, vector_hits + extra
 
 
@@ -337,18 +367,20 @@ def _graph_augment(step_emb, error_emb, all_hits: list, index_path: str, wf: dic
     detail = vectordb.chunks_by_ids(list(scores), index_path, source="ticket")
 
     # Best-scoring chunk per NEW sibling ticket (skip tickets already in the pool).
-    best: dict = {}
-    for id_, sc in scores.items():
+    best: dict = {}   # key -> (combined_score, id)
+    for id_, sd in scores.items():
         d   = detail.get(id_)
         key = d["meta"].get("key") if d else None
         if not key or key in have_keys:
             continue
+        sc = sd["score"]
         if key not in best or sc > best[key][0]:
             best[key] = (sc, id_)
 
     extra = [{"id": id_, "doc": detail[id_]["doc"], "meta": detail[id_]["meta"],
-              "score": sc, "via_graph": True}
-             for sc, id_ in best.values()]
+              "score": scores[id_]["score"], "step_score": scores[id_]["step_score"],
+              "error_score": scores[id_]["error_score"], "via_graph": True}
+             for _sc, id_ in best.values()]
     return all_hits + extra
 
 
@@ -363,6 +395,47 @@ def _apply_hybrid(candidates: list, rrf: dict, wf: dict):
         adj = round((r / max_rrf) * weight, 4) if r else 0.0
         c["hybrid_adj"] = adj
         c["rank_score"] = c.get("rank_score", c["score"]) + adj
+
+
+def _lexical_rescore(query_step: str, query_error: str, candidates: list, wf: dict,
+                     err_weight: float, err_mode: str) -> list:
+    """Score the matched candidates VECTORLESSLY (vectors only gathered them):
+      step  → errormatch.text_similarity  (exact/tolerant; input is copy-pasted)
+      error → errormatch.error_similarity (hard CODE gate + cleaned-message overlap)
+
+    Dynamic weighting — whichever fields the query carries decide the score, and a
+    single field counts 100% (so a perfect error-only OR step-only search isn't capped
+    below the strong threshold):
+      both  present → step_lex*(1 - err_weight) + error_lex*err_weight
+      error only    → error_lex
+      step  only    → step_lex
+    A candidate whose error CODE contradicts the query's is dropped (different failure).
+
+    No-op (returns candidates unchanged) when err_mode != "lexical" (the config
+    off-switch restores cosine behavior), or the query has neither a step nor an error
+    (nothing to score lexically — the vector recall ordering stands)."""
+    if err_mode != "lexical":
+        return candidates
+    import errormatch
+    has_step, has_error = bool(query_step), bool(query_error)
+    if not has_step and not has_error:
+        return candidates
+    kept = []
+    for c in candidates:
+        e_lex = s_lex = None
+        if has_error:
+            e_lex, gated = errormatch.error_similarity(query_error, c.get("error", ""))
+            if gated:
+                continue                   # different error code → different failure
+        if has_step:
+            s_lex = errormatch.text_similarity(query_step, c.get("step", ""))
+        if has_step and has_error:
+            c["score"] = round(s_lex * (1 - err_weight) + e_lex * err_weight, 3)
+        else:
+            c["score"] = e_lex if has_error else s_lex
+        c["error_lex"], c["step_lex"] = e_lex, s_lex
+        kept.append(c)
+    return kept
 
 
 def _apply_order_match(candidates: list, q_type: str, q_reason: str, wf: dict):
@@ -598,6 +671,41 @@ def _llm_parse(raw: str, cfg: dict) -> tuple[str, str]:
 NO_FIX_SENTINEL = "NO_RELIABLE_WORKAROUND"
 
 
+# Acknowledgement / status notes that are NOT workarounds: "already activated",
+# "fixed by L3", "done", "no issue". Matched only when the WHOLE (short) comment is
+# such a note — a comment that also describes an action ("re-triggered the step") is kept.
+_NON_RESOLUTION_RE = re.compile(
+    r'^\W*(?:'
+    r'already\s+\w+'                                             # already activated / done
+    r'|(?:fixed|done|handled|resolved|completed)\s+by\s+l?\d'    # fixed by L3, done by 2
+    r'|no\s+(?:issue|action|fix|workaround)s?(?:\s+\w+){0,3}'   # no issue found / no action needed
+    r'|done|fixed|closing|closed|resolved|n/?a|ok'
+    r')\W*$',
+    re.IGNORECASE)
+
+
+def _is_non_resolution(body: str) -> bool:
+    """True when a SHORT comment is pure acknowledgement / status ('already activated',
+    'fixed by L3', 'done', 'no issue') rather than a workaround. A longer comment, or
+    one whose first line describes an action, is kept."""
+    b = (body or "").strip()
+    if not b:
+        return True
+    head = b.splitlines()[0].strip().strip('*').strip()
+    return bool(_NON_RESOLUTION_RE.match(head)) and len(b) < 80
+
+
+def select_resolution(strong: list) -> dict | None:
+    """The most relevant comment that is an ACTUAL workaround: the first ranked strong
+    match whose comment isn't pure status chatter. Falls back to the top match only if
+    every candidate is chatter (the LLM then declines on it). Avoids the trade-off of
+    blindly feeding rank-1 — a 'fixed by L3' note no longer hides a real fix below it."""
+    for c in strong:
+        if not _is_non_resolution(c.get("comment", "")):
+            return c
+    return strong[0] if strong else None
+
+
 def build_prompt(query: str, result: dict) -> str:
     """Prompt the LLM to produce a grounded workaround in the `=== FIX ===`
     format — a clean, paste-ready resolution comment — WITHOUT hallucinating.
@@ -616,7 +724,10 @@ def build_prompt(query: str, result: dict) -> str:
     sources and steer away from ones marked wrong — so accumulated feedback raises
     the quality of the generated workaround, not just the ordering.
     """
-    strong = result["strong"][:6]
+    # Feed the LLM only the single most relevant REAL workaround — skip status chatter
+    # (e.g. 'fixed by L3') so a genuine fix ranked just below it isn't lost.
+    top    = select_resolution(result["strong"])
+    strong = [top] if top else []
 
     sources    = ""
     has_verified = False
@@ -661,9 +772,10 @@ def build_prompt(query: str, result: dict) -> str:
         "record IDs, and any 'please check / can you look into this' chatter. Keep only "
         "the actual resolution actions.\n"
         f"{feedback_rule}"
-        f"- If the sources do not contain a clear, applicable fix for THIS step and error "
-        f"(e.g. they are just questions, status chatter, or a bare 'done/fixed' with no "
-        f"actions), reply with exactly: {NO_FIX_SENTINEL}\n"
+        f"- If this comment is NOT a real workaround — e.g. an acknowledgement or status "
+        f"note like 'already activated', 'fixed by L3', 'handled by L2', 'done', a "
+        f"question, or a bare 'fixed/closed' with no concrete actions — reply with "
+        f"exactly: {NO_FIX_SENTINEL}\n"
         f"{sources}\n"
         "Output EXACTLY this block and nothing else (omit the Root Cause line if the "
         "sources don't state a cause):\n"

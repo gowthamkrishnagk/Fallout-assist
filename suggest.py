@@ -63,7 +63,9 @@ def suggest_for_query(query_text: str, cfg: dict, exclude_keys=frozenset()) -> d
 
     # Strong match(es) found — produce a grounded `=== FIX ===` recommendation.
     if strong:
-        top      = strong[0]
+        # Same selection the LLM prompt uses: the most relevant REAL workaround, not
+        # blindly rank-1 (so a 'fixed by L3' note doesn't become the verbatim answer).
+        top      = s.select_resolution(strong) or strong[0]
         top_body = top["comment"]
         # Hybrid: if the LLM is disabled, or the best source is ALREADY a clean
         # === FIX === block, show it verbatim — no generation.
