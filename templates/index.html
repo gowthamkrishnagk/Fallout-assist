@@ -252,12 +252,15 @@
           <div class="key-hint">Add several free-tier keys to spread quota. Keys are saved to .env on your machine — never committed to git.</div>
         </div>
 
-        <div id="fallback-row" style="margin-top:14px">
+        <!-- Fallback to other providers is disabled: Synapt is the only allowed
+             provider so production data never spills to another service. Hidden but
+             kept in the DOM so the save logic can still read an empty value. -->
+        <div id="fallback-row" style="margin-top:14px;display:none">
           <label class="field-label">Fallback order
             <span class="muted" style="font-weight:400;font-size:12px">— providers tried, in order, if the one above is down or rate-limited</span>
           </label>
-          <input type="text" id="llm-fallback" class="input-text" style="width:100%" placeholder="e.g. groq, local">
-          <div class="key-hint">Comma-separated: groq, cerebras, nvidia, claude, local. "local" runs only if Ollama is installed.</div>
+          <input type="text" id="llm-fallback" class="input-text" style="width:100%" placeholder="">
+          <div class="key-hint">Disabled — Synapt only.</div>
         </div>
 
         <div class="llm-actions">
@@ -340,7 +343,9 @@
       <input type="number" id="cfg-topk" class="input-text" style="width:80px" min="1" max="20">
     </div>
 
-    <div class="config-section">
+    <!-- Ollama (local LLM) is no longer a selectable provider — hidden but kept in
+         the DOM so saveConfig can still read its value harmlessly. -->
+    <div class="config-section" style="display:none">
       <h3>Ollama URL</h3>
       <input id="cfg-ollama-url" class="input-text" style="width:100%" placeholder="http://localhost:11434">
     </div>
@@ -1048,7 +1053,7 @@ async function saveLLM() {
 }
 
 // ── Active-AI status indicator (sidebar) ─────────────────────────────────────
-const _PROVIDER_LABELS = { local: 'Local (Ollama)', groq: 'Groq', gemini: 'Gemini', claude: 'Claude' };
+const _PROVIDER_LABELS = { synapt: 'Synapt' };
 
 async function loadLLMStatus() {
   const dot  = document.querySelector('#ai-status .ai-dot');

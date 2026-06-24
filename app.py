@@ -537,20 +537,16 @@ def delete_document(doc_id: str):
 
 # ── LLM settings ─────────────────────────────────────────────────────────────
 
+# Only Synapt (the org's governed Azure OpenAI deployment) is exposed in the UI:
+# production org data must stay inside the org tenant, so the free-tier clouds
+# (Groq / Cerebras / NVIDIA) and Claude/local are intentionally not selectable.
+# generate.py still implements them for internal use, but they cannot be picked or
+# set as a fallback — the save/fallback endpoints validate against this dict.
 PROVIDERS = {
-    "local":    {"label": "Local (Ollama)",     "privacy": "private",    "needs_key": False},
-    "groq":     {"label": "Groq",               "privacy": "sends_data", "needs_key": True},
-    "cerebras": {"label": "Cerebras",           "privacy": "sends_data", "needs_key": True},
-    "nvidia":   {"label": "NVIDIA NIM",         "privacy": "sends_data", "needs_key": True},
-    "claude":   {"label": "Claude (Anthropic)", "privacy": "governed",   "needs_key": True},
     "synapt":   {"label": "Synapt (Azure OpenAI)", "privacy": "governed", "needs_key": True},
 }
 
 PROVIDER_MODELS = {
-    "groq":     ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
-    "cerebras": ["gpt-oss-120b", "zai-glm-4.7"],
-    "nvidia":   ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct"],
-    "claude":   ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
     "synapt":   ["gpt-4o-mini"],
 }
 
@@ -558,12 +554,11 @@ PROVIDER_MODELS = {
 @app.get("/api/llm/providers")
 def llm_providers():
     import generate as g
-    cfg          = load_config()
-    local_models = g.available_local_models(cfg["llm"].get("ollama_url", "http://localhost:11434"))
+    cfg = load_config()
     return {
         "ok":        True,
         "providers": PROVIDERS,
-        "models":    {**PROVIDER_MODELS, "local": [m["name"] for m in local_models]},
+        "models":    PROVIDER_MODELS,
         "current":   {"provider": cfg["llm"]["provider"], "model": cfg["llm"]["model"]},
         # Auto-failover order tried when the selected provider errors/rate-limits.
         "fallback":  cfg["llm"].get("fallback", []),
