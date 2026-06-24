@@ -7,6 +7,7 @@ Supported providers:
   groq    → Groq cloud API  (GROQ_API_KEY in .env)
   gemini  → Google Gemini   (GEMINI_API_KEY in .env)
   claude  → Anthropic       (ANTHROPIC_API_KEY in .env)
+  synapt  → Azure OpenAI    (AZURE_OPENAI_* in .env — the Synapt deployment)
 """
 
 import os
@@ -143,6 +144,7 @@ DEFAULT_MODELS = {
     "cerebras": "gpt-oss-120b",
     "nvidia":   "meta/llama-3.1-8b-instruct",
     "claude":   "claude-haiku-4-5-20251001",
+    "synapt":   "gpt-4o-mini",
     "local":    "llama3.2:1b",
 }
 
@@ -193,6 +195,8 @@ def _generate_one(prompt: str, provider: str, model: str, cfg: dict) -> dict:
         return _openai_chat(prompt, model, provider)
     if provider == "claude":
         return _claude(prompt, model)
+    if provider == "synapt":
+        return _synapt(prompt, model)
     raise ValueError(f"Unknown provider: {provider}")
 
 
@@ -389,6 +393,60 @@ def _claude(prompt: str, model: str) -> dict:
     raise LLMRetryable(msg) if any_transient else ValueError(msg)
 
 
+def _synapt(prompt: str, model: str) -> dict:
+    """Synapt — Azure OpenAI (e.g. gpt-4o-mini) via the chat-completions REST API.
+
+    Azure differs from the OpenAI-compatible providers: auth is an `api-key` header
+    (not Bearer), and the URL embeds the *deployment* name plus an api-version. The
+    deployment, endpoint and api-version come from their own env vars; `model`, when
+    set in config, overrides the deployment so the UI model picker still works.
+
+    Same multi-key rotation as the other providers: AZURE_OPENAI_API_KEY may hold
+    several comma-separated keys; a 429'd key is cooled and the next tried; any other
+    error raises so it isn't masked. Raises when every key is rate-limited."""
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+    if not endpoint:
+        raise ValueError("AZURE_OPENAI_ENDPOINT not set in .env")
+    api_ver    = os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview")
+    deployment = model or os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini")
+    keys = _ordered_keys("synapt", "AZURE_OPENAI_API_KEY")
+    if not keys:
+        raise ValueError("AZURE_OPENAI_API_KEY not set in .env")
+    url = (f"{endpoint}/openai/deployments/{deployment}/chat/completions"
+           f"?api-version={api_ver}")
+
+    rate_limited, any_transient = [], False
+    for api_key in keys:
+        resp = httpx.post(
+            url,
+            headers={"api-key": api_key},
+            json={"messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0.2},
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            reason    = _err_reason(resp)
+            transient = _is_transient_429(reason)
+            if not transient:
+                _cool_key("synapt", api_key, resp)
+            any_transient = any_transient or transient
+            rate_limited.append(f"…{api_key[-4:]}{' (busy)' if transient else ''}")
+            if len(keys) > 1:
+                kind = "busy" if transient else "rate-limited"
+                print(f"[LLM] synapt key …{api_key[-4:]} {kind} — rotating to next key")
+            continue
+        if resp.status_code >= 400:
+            reason = _err_reason(resp)
+            err = ValueError(f"synapt {resp.status_code}: {_redact(reason)}")
+            raise LLMRetryable(str(err)) if resp.status_code >= 500 else err
+        answer = resp.json()["choices"][0]["message"]["content"].strip()
+        return {"answer": answer, "provider": "synapt", "model": deployment}
+
+    msg = (f"synapt 429: all {len(keys)} key(s) rate-limited "
+           f"({', '.join(rate_limited)})")
+    raise LLMRetryable(msg) if any_transient else ValueError(msg)
+
+
 def available_local_models(ollama_url: str = "http://localhost:11434") -> list[dict]:
     """Return installed Ollama models (non-cloud only)."""
     try:
@@ -425,7 +483,8 @@ def provider_status(cfg: dict) -> dict:
             return _ok("Ollama reachable")
 
         env_var = (OPENAI_COMPAT.get(provider, {}).get("key")
-                   or {"claude": "ANTHROPIC_API_KEY"}.get(provider, ""))
+                   or {"claude": "ANTHROPIC_API_KEY",
+                       "synapt": "AZURE_OPENAI_API_KEY"}.get(provider, ""))
         keys = _provider_keys(env_var)
         if not keys:
             return _bad(f"No API key set ({env_var})")
@@ -435,6 +494,14 @@ def provider_status(cfg: dict) -> dict:
             # OpenAI-compatible /models endpoint = cheap reachability + auth check
             models_url = OPENAI_COMPAT[provider]["url"].replace("/chat/completions", "/models")
             resp = httpx.get(models_url, headers={"Authorization": f"Bearer {key}"}, timeout=6)
+        elif provider == "synapt":
+            # Azure OpenAI: cheap reachability + auth check via the deployments list.
+            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+            if not endpoint:
+                return _bad("AZURE_OPENAI_ENDPOINT not set in .env")
+            api_ver = os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview")
+            resp = httpx.get(f"{endpoint}/openai/models?api-version={api_ver}",
+                             headers={"api-key": key}, timeout=6)
         else:  # claude
             resp = httpx.get("https://api.anthropic.com/v1/models",
                              headers={"x-api-key": key, "anthropic-version": "2023-06-01"},

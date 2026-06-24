@@ -543,6 +543,7 @@ PROVIDERS = {
     "cerebras": {"label": "Cerebras",           "privacy": "sends_data", "needs_key": True},
     "nvidia":   {"label": "NVIDIA NIM",         "privacy": "sends_data", "needs_key": True},
     "claude":   {"label": "Claude (Anthropic)", "privacy": "governed",   "needs_key": True},
+    "synapt":   {"label": "Synapt (Azure OpenAI)", "privacy": "governed", "needs_key": True},
 }
 
 PROVIDER_MODELS = {
@@ -550,6 +551,7 @@ PROVIDER_MODELS = {
     "cerebras": ["gpt-oss-120b", "zai-glm-4.7"],
     "nvidia":   ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct"],
     "claude":   ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"],
+    "synapt":   ["gpt-4o-mini"],
 }
 
 
@@ -704,7 +706,8 @@ def llm_quota():
 
 def _key_env(provider: str) -> str:
     return {"groq": "GROQ_API_KEY", "cerebras": "CEREBRAS_API_KEY",
-            "nvidia": "NVIDIA_API_KEY", "claude": "ANTHROPIC_API_KEY"}.get(provider, "")
+            "nvidia": "NVIDIA_API_KEY", "claude": "ANTHROPIC_API_KEY",
+            "synapt": "AZURE_OPENAI_API_KEY"}.get(provider, "")
 
 
 # ── Multi-key storage ────────────────────────────────────────────────────────
