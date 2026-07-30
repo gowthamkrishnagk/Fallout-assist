@@ -487,6 +487,10 @@ def _fb_page(title: str, body_html: str, tone: str = "ok") -> HTMLResponse:
                               white-space:normal; }}
   table.wa th {{ width:34%; color:#cbd5e1; text-transform:none; font-size:13px;
                  letter-spacing:0; background:#0f172a; }}
+  /* The copy sources. Offscreen rather than display:none — hidden content cannot be
+     selected, and the Ctrl+C fallback needs a real selection. #plain deliberately gets
+     NO styling of its own, so nothing from this page can ride along into the paste. */
+  .offscreen {{ position:absolute; left:-9999px; top:0; }}
   textarea {{ position:absolute; left:-9999px; width:1px; height:1px; opacity:0; }}
   .btn2 {{ margin-top:12px; background:#2563eb; color:#fff; border:0; cursor:pointer;
            padding:10px 18px; border-radius:8px; font-weight:600; font-size:14px; }}
@@ -601,14 +605,23 @@ def resolution_format_page(key: str = "", cand: str = "", sig: str = ""):
     # Whichever the target understands, the other is ignored. Both parse back through
     # watable.parse_table on ingest, which already handles the ADF-rendered form.
     import watable as wt
-    trows = "".join(
-        f"<tr><th>{_esc(lbl)}</th><td>{_esc(val)}</td></tr>"
-        for lbl, val in wt.rows(d["template"]))
+    trs   = list(wt.rows(d["template"]))
+    # TWO renderings of the same rows, and the difference is the point:
+    #   #tbl   — what you see. Styled for this dark page.
+    #   #plain — what gets COPIED. No class, no styles, and <td> rather than <th>, so it
+    #            pastes as an unstyled table that picks up Jira's own table look instead
+    #            of dragging this page's colours into the ticket. <th> would also come
+    #            back from the /2/ API as Jira's `||header||` form.
+    # Kept as a real (offscreen) DOM node rather than a JS string, so the markup needs no
+    # escaping and the Ctrl+C fallback has something plain to select.
+    disp  = "".join(f"<tr><th>{_esc(l)}</th><td>{_esc(v)}</td></tr>" for l, v in trs)
+    plain = "".join(f"<tr><td>{_esc(l)}</td><td>{_esc(v)}</td></tr>" for l, v in trs)
 
     body = f"""{intro}
-<div class="scroll"><table id="tbl" class="wa">{trows}</table></div>
+<div class="scroll"><table id="tbl" class="wa">{disp}</table></div>
 <button class="btn2" id="copy" onclick="doCopy()">📋 Copy to clipboard</button>
 <span id="done" class="ok-note"></span>
+<div class="offscreen" aria-hidden="true"><table id="plain">{plain}</table></div>
 <textarea id="tpl" readonly aria-hidden="true" tabindex="-1"
           >{_esc(d['template'])}</textarea>
 <p class="muted">Paste this as your resolution comment when you close
@@ -617,7 +630,8 @@ doesn't apply, and keep account numbers / MSISDNs out of the Cause, Solution app
 Customer action rows — those rows get reused on other customers' orders.</p>
 <script>
 function doCopy() {{
-  var tbl   = document.getElementById('tbl');
+  // Copy the PLAIN table, never the styled one on screen.
+  var tbl   = document.getElementById('plain');
   var plain = document.getElementById('tpl').value;
   var html  = tbl.outerHTML;
   var note  = document.getElementById('done');
