@@ -478,12 +478,16 @@ def _fb_page(title: str, body_html: str, tone: str = "ok") -> HTMLResponse:
         letter-spacing:.04em; }}
   td {{ color:#e2e8f0; }}
   td.dim {{ color:#94a3b8; }}
-  /* Resolution-format page: the textarea is the copy source, so it has to stay a real,
-     selectable form control (monospace, since the table is column-aligned pipes). */
-  textarea {{ width:100%; box-sizing:border-box; background:#0f172a; color:#e2e8f0;
-              border:1px solid #334155; border-radius:8px; padding:12px; font-size:13px;
-              font-family:ui-monospace,SFMono-Regular,Consolas,monospace; resize:vertical;
-              white-space:pre; overflow-x:auto; }}
+  /* Resolution-format page. The table is both what you read and what gets copied, so it
+     carries real borders — they survive into the pasted Jira table. The textarea holds
+     the wiki-markup flavour and is never shown; it is not `display:none`, because a
+     hidden control's .value must stay readable and selectable. */
+  table.wa {{ border:1px solid #334155; }}
+  table.wa th, table.wa td {{ border:1px solid #334155; vertical-align:top;
+                              white-space:normal; }}
+  table.wa th {{ width:34%; color:#cbd5e1; text-transform:none; font-size:13px;
+                 letter-spacing:0; background:#0f172a; }}
+  textarea {{ position:absolute; left:-9999px; width:1px; height:1px; opacity:0; }}
   .btn2 {{ margin-top:12px; background:#2563eb; color:#fff; border:0; cursor:pointer;
            padding:10px 18px; border-radius:8px; font-weight:600; font-size:14px; }}
   .btn2:hover {{ background:#1d4ed8; }}
@@ -587,39 +591,79 @@ def resolution_format_page(key: str = "", cand: str = "", sig: str = ""):
                  "the rest as you work it: yours would be the first indexed resolution for "
                  "this failure.</p>")
 
-    # The textarea is the copy source, not decoration: on plain HTTP (this app is served
-    # over http:// on a LAN IP) navigator.clipboard is undefined because the page is not a
-    # secure context, so the fallback has to select real text in a real form control and
-    # use execCommand. Readonly, not disabled — a disabled control can't be selected.
+    # Rendered as a REAL html table, and copied as one. The stored template is Jira WIKI
+    # markup (|label|value|), which only renders as a table in the old wiki editor — in
+    # Jira Cloud's rich-text (ADF) editor, pasting it gives literal pipe characters, which
+    # is exactly what it looked like before. The ADF editor DOES convert pasted HTML
+    # tables into real tables, so the copy puts two flavours on the clipboard:
+    #   text/html  -> this <table>, for the Cloud editor (and anything rich-text)
+    #   text/plain -> the pipe markup, for a wiki-markup editor or a plain-text field
+    # Whichever the target understands, the other is ignored. Both parse back through
+    # watable.parse_table on ingest, which already handles the ADF-rendered form.
+    import watable as wt
+    trows = "".join(
+        f"<tr><th>{_esc(lbl)}</th><td>{_esc(val)}</td></tr>"
+        for lbl, val in wt.rows(d["template"]))
+
     body = f"""{intro}
-<textarea id="tpl" readonly rows="{d['template'].count(chr(10)) + 1}"
-          onclick="this.select()">{_esc(d['template'])}</textarea>
+<div class="scroll"><table id="tbl" class="wa">{trows}</table></div>
 <button class="btn2" id="copy" onclick="doCopy()">📋 Copy to clipboard</button>
 <span id="done" class="ok-note"></span>
+<textarea id="tpl" readonly aria-hidden="true" tabindex="-1"
+          >{_esc(d['template'])}</textarea>
 <p class="muted">Paste this as your resolution comment when you close
-<b>{_esc(key)}</b>. Keep every row on one line, use <b>NA</b> for a row that genuinely
+<b>{_esc(key)}</b> — it pastes as a table. Use <b>NA</b> for a row that genuinely
 doesn't apply, and keep account numbers / MSISDNs out of the Cause, Solution applied and
 Customer action rows — those rows get reused on other customers' orders.</p>
 <script>
 function doCopy() {{
-  var t = document.getElementById('tpl');
-  var ok = function () {{
-    var d = document.getElementById('done');
-    d.textContent = 'Copied';
-    setTimeout(function () {{ d.textContent = ''; }}, 2500);
-  }};
-  // Secure-context API first; falls back to the legacy selection copy, which is what
-  // actually runs when this page is served over http://.
-  if (navigator.clipboard && window.isSecureContext) {{
-    navigator.clipboard.writeText(t.value).then(ok, legacy);
-  }} else {{ legacy(); }}
-  function legacy() {{
-    t.focus(); t.select(); t.setSelectionRange(0, t.value.length);
+  var tbl   = document.getElementById('tbl');
+  var plain = document.getElementById('tpl').value;
+  var html  = tbl.outerHTML;
+  var note  = document.getElementById('done');
+  function ok() {{
+    note.textContent = 'Copied as a table';
+    setTimeout(function () {{ note.textContent = ''; }}, 2500);
+  }}
+  // Secure context only (https/localhost). This app is served over http:// on a LAN
+  // IP, so in practice the legacy path below is the one that runs.
+  if (navigator.clipboard && window.isSecureContext && window.ClipboardItem) {{
     try {{
-      if (document.execCommand('copy')) {{ ok(); return; }}
-    }} catch (e) {{}}
-    document.getElementById('done').textContent =
-      'Press Ctrl+C — the text is selected';
+      navigator.clipboard.write([new ClipboardItem({{
+        'text/html':  new Blob([html],  {{type: 'text/html'}}),
+        'text/plain': new Blob([plain], {{type: 'text/plain'}})
+      }})]).then(ok, legacy);
+      return;
+    }} catch (e) {{ /* fall through */ }}
+  }}
+  legacy();
+
+  function legacy() {{
+    // execCommand copies the SELECTION, so a selection has to exist — but the copy
+    // event handler then overrides both flavours, so what is selected doesn't decide
+    // what lands on the clipboard.
+    function onCopy(e) {{
+      var cd = e.clipboardData || window.clipboardData;
+      if (!cd) {{ return; }}
+      cd.setData('text/html',  html);
+      cd.setData('text/plain', plain);
+      e.preventDefault();
+    }}
+    document.addEventListener('copy', onCopy);
+    var sel   = window.getSelection();
+    var saved = sel.rangeCount ? sel.getRangeAt(0) : null;
+    var rng   = document.createRange();
+    rng.selectNodeContents(tbl);
+    sel.removeAllRanges(); sel.addRange(rng);
+    var done = false;
+    try {{ done = document.execCommand('copy'); }} catch (e) {{}}
+    document.removeEventListener('copy', onCopy);
+    sel.removeAllRanges();
+    if (saved) {{ sel.addRange(saved); }}
+    if (done) {{ ok(); return; }}
+    // Last resort: leave the table selected so Ctrl+C copies it as rich text anyway.
+    sel.addRange(rng);
+    note.textContent = 'Press Ctrl+C — the table is selected';
   }}
 }}
 </script>"""

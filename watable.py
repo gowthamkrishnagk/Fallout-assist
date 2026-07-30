@@ -158,6 +158,34 @@ def is_table(body: str) -> bool:
     return bool(parse_table(body))
 
 
+def rows(rendered: str) -> list[tuple[str, str]]:
+    """[(label, value)] for a table produced by `render`, in the order written.
+
+    Deliberately NOT parse_table: that one canonicalises labels, keeps only the first
+    occurrence, and returns {} for an all-empty table — correct when reading a resolution
+    an engineer wrote, wrong here. This reads back OUR OWN rendering to re-display it, so
+    a blank template must survive with its empty rows intact.
+
+    It does not use `_cells` either, for the same reason: `_cells` strips ALL outer pipes,
+    so a blank row (`|Solution applied||`) collapses to a single cell and disappears.
+    `render` always writes exactly `|label|value|`, so one leading and one trailing pipe
+    come off and the rest is label + value."""
+    out = []
+    for line in (rendered or "").splitlines():
+        t = line.strip()
+        if not (t.startswith("|") and t.endswith("|") and len(t) > 2):
+            continue
+        parts = t[1:-1].split("|")
+        if len(parts) < 2:
+            continue
+        # A value containing '|' splits into extra parts — rejoin them.
+        label, value = parts[0].strip(), "|".join(parts[1:]).strip()
+        if _SEP_CELL.match(label) or (value and _SEP_CELL.match(value)):
+            continue                                   # markdown separator row
+        out.append((label, value))
+    return out
+
+
 # ── Reading a table back from stored chunk metadata ───────────────────────────────
 #
 # ingest parses the table ONCE, when the comment is indexed, and stores the rows as
