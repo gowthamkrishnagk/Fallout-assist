@@ -110,30 +110,40 @@ def _auto_ingest_loop():
 
 # ── Background Jira auto-suggest poller ──────────────────────────────────────
 # Periodically scans inflow Order Fallout tickets and posts a suggested workaround
-# (or, in dry-run, logs what it would post). Config is re-read every minute, so
-# enabling/disabling or changing the cadence takes effect within ~1 min. Skips a
-# tick while an ingest is running (the index is in flux).
+# (or, in dry-run, logs what it would post). Config is re-read every _SUGGEST_TICK
+# seconds, so enabling/disabling or changing the cadence takes effect within that.
+# Skips a tick while an ingest is running (the index is in flux).
+
+_SUGGEST_TICK = 5          # seconds between config re-reads
+
+
+def _suggest_interval_seconds(wf: dict) -> int:
+    """The effective poll interval, delegated to jirabot so the scheduler, the API and
+    the dashboard can never disagree about the cadence."""
+    import jirabot
+    return jirabot.interval_seconds(wf)
+
 
 def _jira_suggest_loop():
     import jirabot
-    elapsed = 0
+    waited = 0
     while True:
-        time.sleep(60)
+        time.sleep(_SUGGEST_TICK)
         try:
             cfg = load_config()
             wf  = cfg["workaround_finder"]
             enabled  = bool(wf.get("jira_suggest_enabled", False))
-            interval = int(wf.get("jira_suggest_minutes", 1) or 0)
+            interval = _suggest_interval_seconds(wf)
         except Exception as e:
             print(f"[JIRA-SUGGEST] config read failed: {e}")
             continue
         if not enabled or interval <= 0:
-            elapsed = 0
+            waited = 0
             continue
-        elapsed += 1
-        if elapsed < interval:
+        waited += _SUGGEST_TICK
+        if waited < interval:
             continue
-        elapsed = 0
+        waited = 0
 
         if _running:        # an ingest is in progress — index in flux, skip this tick
             print("[JIRA-SUGGEST] skipped — an ingest is running")
@@ -305,25 +315,94 @@ async def ask(body: dict):
 def feedback_record(body: dict):
     """Record a 👍 (correct) / 👎 (wrong) vote on a suggested workaround. Scoped to
     (workaround identity, failure) so it trains ranking for that step+error only.
-    Pure runtime signal — does not touch the index, so no re-ingest is needed."""
+    The vote itself is a pure runtime signal — it does not touch the index.
+
+    A 👎 may carry an optional `note`: what the fix actually is. That note is rewritten
+    into `=== FIX ===` steps and queued as a PENDING suggestion (never indexed here — see
+    suggestions.py for why the approval gate matters). The note is optional on purpose: a
+    👎 has to stay one click, or people stop voting and the ranking signal dries up."""
     import feedback as fb
     vote = body.get("vote", "")
     key  = (body.get("key", "") or "").strip()
+    note = (body.get("note", "") or "").strip()
     if vote not in ("up", "down"):
         raise HTTPException(400, "vote must be 'up' or 'down'")
     if not key:
         raise HTTPException(400, "key required (ticket key or document filename)")
-    cfg = load_config()
+    cfg   = load_config()
+    step  = body.get("step", "")
+    error = body.get("error", "")
     rec = fb.record(
         vote=vote,
         kind=body.get("kind", "ticket"),
         key=key,
-        step=body.get("step", ""),
-        error=body.get("error", ""),
+        step=step,
+        error=error,
         query_raw=body.get("query_raw", ""),
         cfg=cfg,
     )
-    return {"ok": True, "vote": rec["vote"]}
+    out = {"ok": True, "vote": rec["vote"]}
+
+    if vote == "down" and note:
+        # The vote is already saved above, so anything below costs the note, never the
+        # training signal.
+        out.update(_queue_fix_note(note, key, step, error,
+                                   body.get("query_raw", ""), cfg))
+    return out
+
+
+def _queue_fix_note(note: str, disliked_key: str, step: str, error: str,
+                    query_raw: str, cfg: dict) -> dict:
+    """Rewrite an agent's 'here's the real fix' note and queue it for review.
+
+    Shared by /api/feedback (one-shot: vote + note together) and /api/suggestions (the
+    UI's path, where the 👎 vote has already been recorded and the note follows). Never
+    raises — a failure here must not fail the caller's primary action."""
+    try:
+        if not cfg["workaround_finder"].get("suggestions_enabled", True):
+            return {"note_status": "disabled"}
+        if not (step or error):
+            # ingest_suggestion embeds against the step and/or error; with neither there
+            # is no failure to attach the fix to, so it could never be retrieved.
+            return {"note_status": "no_failure_context"}
+        import suggestions as sg
+        syn  = sg.synthesize(note, step, error, cfg)
+        srec = sg.add(step, error, source_key=(query_raw or "")[:80],
+                      disliked_key=disliked_key, suggestion=syn["body"], cfg=cfg,
+                      origin="app_dislike", raw=syn["raw"],
+                      synth={k: syn[k] for k in ("provider", "model", "flag", "has_ids")})
+        print(f"[FEEDBACK] 👎 on {disliked_key} + fix note -> pending suggestion "
+              f"{srec['id']} (flag={syn['flag'] or 'none'})")
+        return {"note_status": "pending", "suggestion_id": srec["id"],
+                "synthesized": syn["body"], "note_flag": syn["flag"],
+                "note_has_ids": syn["has_ids"]}
+    except Exception as e:
+        print(f"[FEEDBACK] note capture failed for {disliked_key}: {str(e)[:160]}")
+        return {"note_status": f"failed: {str(e)[:120]}"}
+
+
+@app.post("/api/suggestions")
+def suggestions_submit(body: dict):
+    """An agent's corrected fix, submitted after a 👎 in the app.
+
+    Separate from /api/feedback because the vote fires on the FIRST click (so it is never
+    lost if the note is abandoned) and the note follows — routing both through the vote
+    endpoint would record the 👎 twice."""
+    note = (body.get("note", "") or "").strip()
+    if not note:
+        raise HTTPException(400, "note required")
+    cfg = load_config()
+    out = _queue_fix_note(note, (body.get("key", "") or "").strip(),
+                          body.get("step", ""), body.get("error", ""),
+                          body.get("query_raw", ""), cfg)
+    status = out.get("note_status", "")
+    if status.startswith("failed"):
+        raise HTTPException(500, status)
+    if status == "disabled":
+        raise HTTPException(409, "user-submitted fixes are disabled in config")
+    if status == "no_failure_context":
+        raise HTTPException(400, "this result has no step/error to attach a fix to")
+    return {"ok": True, **out}
 
 
 # ── User-submitted workarounds: pending review + approval ─────────────────────
@@ -381,7 +460,7 @@ def _fb_page(title: str, body_html: str, tone: str = "ok") -> HTMLResponse:
   body {{ background:#0f172a; color:#e2e8f0; font-family:system-ui,Segoe UI,sans-serif;
           display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; }}
   .card {{ background:#1e293b; border:1px solid #334155; border-left:4px solid {color};
-           border-radius:12px; padding:28px 32px; max-width:560px; }}
+           border-radius:12px; padding:28px 32px; max-width:720px; }}
   h1 {{ font-size:18px; margin:0 0 12px; color:#f8fafc; }}
   p {{ line-height:1.6; color:#cbd5e1; }}
   pre {{ background:#0f172a; border:1px solid #334155; border-radius:8px; padding:12px;
@@ -389,6 +468,26 @@ def _fb_page(title: str, body_html: str, tone: str = "ok") -> HTMLResponse:
   a.btn {{ display:inline-block; margin-top:14px; background:#ef4444; color:#fff;
            text-decoration:none; padding:10px 18px; border-radius:8px; font-weight:600; }}
   .muted {{ color:#64748b; font-size:12px; margin-top:16px; }}
+  /* Feedback-details table. Scrolls inside its own box so a long voter name can never
+     make the whole page scroll sideways on a phone. */
+  .scroll {{ overflow-x:auto; }}
+  table {{ border-collapse:collapse; width:100%; font-size:13px; margin-top:4px; }}
+  th, td {{ text-align:left; padding:7px 10px; border-bottom:1px solid #334155;
+            white-space:nowrap; }}
+  th {{ color:#94a3b8; font-weight:600; font-size:11px; text-transform:uppercase;
+        letter-spacing:.04em; }}
+  td {{ color:#e2e8f0; }}
+  td.dim {{ color:#94a3b8; }}
+  /* Resolution-format page: the textarea is the copy source, so it has to stay a real,
+     selectable form control (monospace, since the table is column-aligned pipes). */
+  textarea {{ width:100%; box-sizing:border-box; background:#0f172a; color:#e2e8f0;
+              border:1px solid #334155; border-radius:8px; padding:12px; font-size:13px;
+              font-family:ui-monospace,SFMono-Regular,Consolas,monospace; resize:vertical;
+              white-space:pre; overflow-x:auto; }}
+  .btn2 {{ margin-top:12px; background:#2563eb; color:#fff; border:0; cursor:pointer;
+           padding:10px 18px; border-radius:8px; font-weight:600; font-size:14px; }}
+  .btn2:hover {{ background:#1d4ed8; }}
+  .ok-note {{ color:#22c55e; font-size:13px; margin-left:10px; font-weight:600; }}
 </style></head><body><div class="card">
 <h1>{title}</h1>{body_html}
 <div class="muted">FalloutAssist · you can close this tab.</div>
@@ -445,6 +544,148 @@ def _esc(s: str) -> str:
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+def _fb_when(ts: str) -> str:
+    """'2026-07-29T18:30:00.123456' -> '2026-07-29 18:30 UTC'. Records are written with
+    utcnow() (feedback.record), so the label is accurate, not assumed."""
+    t = (ts or "").strip()
+    if len(t) < 16:
+        return t
+    return f"{t[:10]} {t[11:16]} UTC"
+
+
+@app.get("/api/resolution-format", response_class=HTMLResponse)
+def resolution_format_page(key: str = "", cand: str = "", sig: str = ""):
+    """The "Copy the resolution format" page behind the link in a Jira comment.
+
+    Replaces the second comment the bot used to post: the 8-field table is shown here,
+    pre-filled, with a one-click copy so the assignee pastes it as their resolution
+    comment instead of retyping it. Read-only — it records nothing."""
+    import jirabot
+    key, cand = key.strip(), cand.strip()
+    if not key:
+        return _fb_page("Invalid link", "<p>This format link is malformed.</p>", "err")
+    if not jirabot.verify(key, cand, jirabot.FORMAT_ACTION, sig):
+        return _fb_page("Invalid or expired link",
+                        "<p>This format link could not be verified.</p>", "err")
+
+    d = jirabot.resolution_format(key, load_config())
+    if not d["template"]:
+        return _fb_page(f"Resolution format for {_esc(key)}",
+                        "<p>Couldn't build the format for this ticket — Jira may be "
+                        "unreachable. Open the app and search the failure to get it.</p>",
+                        "err")
+
+    if d["prefilled"]:
+        intro = (f"<p>Pre-filled from the suggested workaround"
+                 + (f" (matched <b>{_esc(d['matched'])}</b>)" if d["matched"] else "")
+                 + ". <b>Check every row against what you actually did</b> and correct it "
+                 "before posting — the bottom four rows are what get reused on other "
+                 "tickets.</p>")
+    else:
+        intro = ("<p>No past fix matched this failure, so there's nothing to pre-fill — "
+                 "<b>BAN CAN</b> and <b>MSISDN</b> are filled in from the ticket. Complete "
+                 "the rest as you work it: yours would be the first indexed resolution for "
+                 "this failure.</p>")
+
+    # The textarea is the copy source, not decoration: on plain HTTP (this app is served
+    # over http:// on a LAN IP) navigator.clipboard is undefined because the page is not a
+    # secure context, so the fallback has to select real text in a real form control and
+    # use execCommand. Readonly, not disabled — a disabled control can't be selected.
+    body = f"""{intro}
+<textarea id="tpl" readonly rows="{d['template'].count(chr(10)) + 1}"
+          onclick="this.select()">{_esc(d['template'])}</textarea>
+<button class="btn2" id="copy" onclick="doCopy()">📋 Copy to clipboard</button>
+<span id="done" class="ok-note"></span>
+<p class="muted">Paste this as your resolution comment when you close
+<b>{_esc(key)}</b>. Keep every row on one line, use <b>NA</b> for a row that genuinely
+doesn't apply, and keep account numbers / MSISDNs out of the Cause, Solution applied and
+Customer action rows — those rows get reused on other customers' orders.</p>
+<script>
+function doCopy() {{
+  var t = document.getElementById('tpl');
+  var ok = function () {{
+    var d = document.getElementById('done');
+    d.textContent = 'Copied';
+    setTimeout(function () {{ d.textContent = ''; }}, 2500);
+  }};
+  // Secure-context API first; falls back to the legacy selection copy, which is what
+  // actually runs when this page is served over http://.
+  if (navigator.clipboard && window.isSecureContext) {{
+    navigator.clipboard.writeText(t.value).then(ok, legacy);
+  }} else {{ legacy(); }}
+  function legacy() {{
+    t.focus(); t.select(); t.setSelectionRange(0, t.value.length);
+    try {{
+      if (document.execCommand('copy')) {{ ok(); return; }}
+    }} catch (e) {{}}
+    document.getElementById('done').textContent =
+      'Press Ctrl+C — the text is selected';
+  }}
+}}
+</script>"""
+    return _fb_page(f"Resolution format for {_esc(key)}", body, "ok")
+
+
+@app.get("/api/feedback-details", response_class=HTMLResponse)
+def feedback_details_page(key: str = "", cand: str = "", sig: str = ""):
+    """The "who gave feedback" page behind the *Details* link in a Jira comment.
+
+    Read-only: it records nothing and changes nothing, so unlike the 👎 link it needs no
+    confirmation step. Still HMAC-verified — it discloses who voted, so it must not be a
+    guessable public endpoint."""
+    import jirabot
+    key, cand = key.strip(), cand.strip()
+    if not key or not cand:
+        return _fb_page("Invalid link", "<p>This details link is malformed.</p>", "err")
+    if not jirabot.verify(key, cand, jirabot.DETAILS_ACTION, sig):
+        return _fb_page("Invalid or expired link",
+                        "<p>This details link could not be verified.</p>", "err")
+
+    d      = jirabot.feedback_details(key, cand, load_config())
+    counts = d["counts"]
+    votes  = d["votes"]
+
+    head = (f"<p>Feedback on the workaround matched from <b>{_esc(cand)}</b> "
+            f"for the failure on <b>{_esc(key)}</b>"
+            + (f" — <b>{_esc(d['error'] or d['step'])}</b>" if (d["error"] or d["step"])
+               else "") + ".</p>"
+            f"<p style='font-size:20px;margin:4px 0 18px'>👍 {counts['up']} "
+            f"&nbsp;·&nbsp; 👎 {counts['down']}</p>")
+
+    if not votes:
+        return _fb_page(f"Feedback on {_esc(key)}",
+                        head + "<p class='muted'>No votes recorded for this workaround "
+                        "on this failure yet.</p>", "warn")
+
+    rows = []
+    for v in votes:
+        who = _esc(v["voter"]) if v["voter"] else "<i>anonymous</i>"
+        # How the name was obtained, so an approximation is never mistaken for a
+        # confirmed identity. Only the in-Jira field channel can attribute a vote;
+        # in-app votes and comment-link clicks genuinely cannot.
+        src = {"jira_field": "Jira field",
+               "assignee":   "assignee (assumed)"}.get(v["voter_source"], "link / in-app")
+        rows.append(
+            "<tr>"
+            f"<td>{'👍' if v['vote'] == 'up' else '👎'}</td>"
+            f"<td>{who}</td>"
+            f"<td class='dim'>{_esc(src)}</td>"
+            f"<td class='dim'>{_esc(v['from_key'])}</td>"
+            f"<td class='dim'>{_esc(_fb_when(v['ts']))}</td>"
+            "</tr>")
+
+    table = (
+        "<div class='scroll'><table><thead><tr><th></th><th>Who</th><th>Via</th>"
+        "<th>From ticket</th><th>When</th></tr></thead><tbody>"
+        + "".join(rows) + "</tbody></table></div>"
+        "<p class='muted'>Names come from the in-Jira <i>Workaround helpful?</i> field. "
+        "A 👍/👎 clicked from a comment link, or given in the app, cannot be attributed "
+        "to a person — one link is shared by everyone reading the ticket, and the app has "
+        "no sign-in — so those are shown as anonymous rather than guessed.</p>")
+
+    return _fb_page(f"Feedback on {_esc(key)}", head + table, "ok")
+
+
 @app.get("/api/jira-suggest/status")
 def jira_suggest_status():
     import jirabot
@@ -470,8 +711,17 @@ def jira_suggest_config(body: dict):
         wf["jira_suggest_enabled"] = bool(body["enabled"])
     if "dry_run" in body:
         wf["jira_suggest_dry_run"] = bool(body["dry_run"])
-    if "minutes" in body:
-        wf["jira_suggest_minutes"] = max(0, int(body["minutes"]))
+    # Interval: `seconds` is authoritative. A client that still posts `minutes` (the
+    # older dashboard) is translated into seconds — otherwise its control would save
+    # successfully and change nothing, because jira_suggest_seconds takes precedence.
+    if "seconds" in body:
+        secs = max(0, int(body["seconds"]))
+        wf["jira_suggest_seconds"] = secs
+        wf.pop("jira_suggest_minutes", None)
+    elif "minutes" in body:
+        mins = max(0, int(body["minutes"]))
+        wf["jira_suggest_seconds"] = mins * 60
+        wf.pop("jira_suggest_minutes", None)
     if "jql" in body and str(body["jql"]).strip():
         wf["jira_suggest_jql"] = str(body["jql"]).strip()
     if "public_base_url" in body:
@@ -763,12 +1013,22 @@ def _write_env(key: str, value: str):
 @app.get("/api/config")
 def config_get():
     cfg = load_config()
+    wf  = cfg["workaround_finder"]
     return {
-        "jql":        cfg["workaround_finder"]["ingest_jql"],
-        "top_k":      cfg["workaround_finder"]["top_k"],
-        "jira_email": cfg["jira"].get("email", ""),
-        "ollama_url": cfg["llm"].get("ollama_url", "http://localhost:11434"),
-        "has_token":  bool(os.getenv("JIRA_API_TOKEN", "").strip()),
+        "jql":               wf["ingest_jql"],
+        "top_k":             wf["top_k"],
+        "jira_email":        cfg["jira"].get("email", ""),
+        "ollama_url":        cfg["llm"].get("ollama_url", "http://localhost:11434"),
+        "has_token":         bool(os.getenv("JIRA_API_TOKEN", "").strip()),
+        # Surfaced so the tab reflects what the app is actually doing. score_threshold
+        # is the knob behind the `no_match` rate — the single biggest reason a ticket
+        # gets no suggestion — so it belongs in the UI rather than config.json only.
+        # No synthesis_format: every suggestion now produces BOTH the === FIX === steps
+        # (the workaround) and the pre-filled 8-field table (the resolution comment), so
+        # there is no longer a format to pick.
+        "synthesis_sources": int(wf.get("synthesis_sources", 4) or 4),
+        "score_threshold":   float(wf.get("score_threshold", 0.7)),
+        "embed_model":       cfg.get("embed", {}).get("model", ""),
     }
 
 
@@ -779,6 +1039,13 @@ def config_set(body: dict):
         cfg["workaround_finder"]["ingest_jql"] = body["jql"]
     if "top_k" in body:
         cfg["workaround_finder"]["top_k"] = int(body["top_k"])
+    if "synthesis_sources" in body:
+        cfg["workaround_finder"]["synthesis_sources"] = max(1, min(10, int(body["synthesis_sources"])))
+    if "score_threshold" in body:
+        # Clamped: below ~0.5 the lexical error gate is doing all the work and near-miss
+        # failures start surfacing as confident suggestions; above 0.95 almost nothing
+        # qualifies and the no_match rate goes to 100%.
+        cfg["workaround_finder"]["score_threshold"] = max(0.5, min(0.95, float(body["score_threshold"])))
     if "jira_email" in body:
         cfg["jira"]["email"] = body["jira_email"]
     if body.get("ollama_url", "").strip():

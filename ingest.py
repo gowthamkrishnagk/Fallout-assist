@@ -19,7 +19,8 @@ load_dotenv()
 
 import embedder
 import vectordb
-from textclean import clean_text, extract_fix_block
+import watable
+from textclean import clean_text, clean_error_text, extract_fix_block
 
 _STATE_FILE  = Path(__file__).parent / "trackers" / "ingest_state.json"
 _ingest_lock = threading.Lock()
@@ -30,6 +31,19 @@ _STRUCTURED_FIELDS = [
     "Error Description", "Error Code", "Sub Type", "Order Sub Type",
     "Service Type", "Action",
 ]
+
+# Fields whose value is an ERROR in the canonical 'code | message' form that
+# errormatch._CODE_RE keys on (e.g. '14081 | Plan instance already cancelled').
+# They need their own handling for three reasons, all of which silently discarded
+# the error code before:
+#   1. the value legitimately CONTAINS '|', so the generic matcher's table-cell
+#      terminator truncated it to the bare code;
+#   2. that bare code then looked like a pure number and was dropped by the guard
+#      that (correctly) discards order/account IDs;
+#   3. clean_text strips 6+ digit runs (MSISDNs / order numbers), which would eat a
+#      6-digit error code — _CODE_RE accepts 1-6 digits.
+# The code is the sharpest discriminator in the whole corpus, so it must survive.
+_ERROR_FIELDS = {"Error Description", "Error Code"}
 
 
 # ── Jira ingestion ────────────────────────────────────────────────────────────
@@ -122,18 +136,43 @@ def _clean_for_embed(text: str) -> str:
 def _parse_structured_fields(desc: str) -> dict:
     """{field: value} for the structured labels found in a ticket description.
     Handles Jira wiki markup bold (*Field:*), plain text, and table cells. Pure
-    numbers are skipped (they're order/account IDs, not meaningful text)."""
+    numbers are skipped (they're order/account IDs, not meaningful text).
+
+    Each VALUE goes through the canonical cleaner, exactly like step and error do.
+    These values are embedded (they become desc_fields inside the step vector) and
+    compared as categories, so an MSISDN / order number / Salesforce ID left inside
+    one ticket's Order Reason splits it away from its own same-failure siblings —
+    the split-cluster failure textclean.clean_text exists to prevent. The query side
+    already cleans (search._grab_field -> _clean_query -> clean_text), so cleaning
+    here is what makes the two sides symmetric.
+
+    Cleaned per-value, never on the joined block: clean_text collapses whitespace,
+    which would flatten the 'Field: value\\nField: value' layout that the step
+    embedding and the display text both depend on."""
     out: dict = {}
     for field in _STRUCTURED_FIELDS:
-        # Matches: *Order Reason:* value  |  Order Reason: value  |  | Order Reason | value |
-        m = re.search(
-            rf'(?:^|\n|\|)\s*\*?{re.escape(field)}\*?\s*[:\|]\s*\*?([^*\n\|]{{1,200}}?)\*?\s*(?:\||$|\n)',
-            desc, re.IGNORECASE | re.MULTILINE
-        )
-        if m:
-            val = m.group(1).strip().strip('*').strip()
-            if val and not re.match(r'^\d+$', val):
-                out[field] = val
+        is_err = field in _ERROR_FIELDS
+        if is_err:
+            # Error values contain '|' themselves ('14081 | Plan instance already
+            # cancelled'), so stop at END OF LINE rather than at the first pipe —
+            # otherwise the message is thrown away and only the bare code survives.
+            pattern = (rf'(?:^|\n|\|)\s*\*?{re.escape(field)}\*?\s*[:\|]'
+                       rf'\s*\*?([^*\n]{{1,200}}?)\s*(?:$|\n)')
+        else:
+            # Matches: *Order Reason:* value  |  Order Reason: value  |  | Order Reason | value |
+            pattern = (rf'(?:^|\n|\|)\s*\*?{re.escape(field)}\*?\s*[:\|]'
+                       rf'\s*\*?([^*\n\|]{{1,200}}?)\*?\s*(?:\||$|\n)')
+        m = re.search(pattern, desc, re.IGNORECASE | re.MULTILINE)
+        if not m:
+            continue
+        val = clean_error_text(m.group(1)) if is_err else clean_text(m.group(1))
+        if not val:
+            continue
+        # A bare number is an order/account ID in every field EXCEPT the error ones,
+        # where the code alone ('Error Code: 14081') is the meaningful content.
+        if re.fullmatch(r'\d+', val) and not is_err:
+            continue
+        out[field] = val
     return out
 
 
@@ -153,6 +192,24 @@ def _is_bot(display_name: str) -> bool:
     return display_name.lower().strip() in _BOT_AUTHORS
 
 
+def _is_own_comment(body: str) -> bool:
+    """True for a comment FalloutAssist itself posted — the suggested workaround or the
+    resolution-format reminder.
+
+    Neither may ever be ingested as a resolution. The suggestion is a COPY of some other
+    ticket's fix, so indexing it would let one resolution breed duplicates that vote for
+    each other; the reminder is a blank table, which would index as a well-formed
+    resolution containing nothing. Matched on the footer marker rather than the author
+    name because the bot posts under whatever Jira service account is configured, which
+    _BOT_AUTHORS cannot know in advance."""
+    return any(m in (body or "") for m in _own_markers())
+
+
+def _own_markers() -> tuple:
+    import jirabot
+    return jirabot.COMMENT_MARKERS
+
+
 def _extract_error_context(issue) -> str:
     """Pull error description from two sources:
     1. PR_Error_Description in SAC BOT comments (e.g. '14081 | Plan instance already cancelled')
@@ -170,20 +227,32 @@ def _extract_error_context(issue) -> str:
                 parts = line.split(":", 1)
                 if len(parts) == 2:
                     # Same canonical cleaner as Source 2 and the query side, so
-                    # the identical error never embeds two different ways.
-                    err = clean_text(parts[1])
+                    # the identical error never embeds two different ways. The
+                    # error-aware variant keeps the leading 'code |' — plain
+                    # clean_text would erase a 6-digit code as an order number.
+                    err = clean_error_text(parts[1])
                     if err:
                         return err
 
     # Source 2: Description field — handles errors SAC BOT doesn't log (e.g. Asurion errors)
     desc = getattr(issue.fields, 'description', '') or ''
     if isinstance(desc, str) and desc.strip() and not desc.strip().startswith('{'):
+        # Read the labelled fields through the structured parser, so the description is
+        # parsed ONE way everywhere and the 'code | message' form survives. The old
+        # line scan below required 20+ chars and didn't match an 'Error Code' label at
+        # all, so a bare 'Error Code: 14081' reached neither the error collection nor
+        # the step vector — the code is the sharpest signal we have, so it must.
+        struct = _parse_structured_fields(desc)
+        for f in ("Error Description", "Error Code"):
+            if struct.get(f):
+                return struct[f]
+        # Fallback: an error stated without a label the parser recognises. Kept at 20+
+        # chars because an unlabelled short fragment is far more likely to be noise.
         for line in desc.splitlines():
             line = line.strip().strip('*').strip()
-            # Look for lines that contain "Error" label or look like an error message
             m = re.search(r'Error(?:\s+Description)?\s*[:\|]\s*(.{20,300})', line, re.IGNORECASE)
             if m:
-                return clean_text(m.group(1))
+                return clean_error_text(m.group(1))
 
     return ""
 
@@ -289,7 +358,7 @@ def _get_resolution_comments(issue) -> list[dict]:
         if _is_bot(c.author.displayName):
             continue
         raw = (c.body or "").strip()
-        if not raw or _META_NOTE.search(raw):
+        if not raw or _META_NOTE.search(raw) or _is_own_comment(raw):
             continue
         is_asg      = _is_assignee(c)
         substantive = len(raw) > 40
@@ -473,10 +542,19 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                     step_texts.append(step_text)
                     error_texts.append(error_text)
                     display_texts.append(display_text)
+                    # The team's 8-field workaround table (adopted 2026-07-28). When the
+                    # resolution is one, its rows are stored as dedicated `wa_*` metadata:
+                    # these are by far the richest resolutions in the corpus (the free-text
+                    # median is ~56 chars), and parsing them ONCE here is what lets
+                    # retrieval and synthesis read Cause / Solution applied / System
+                    # modified as first-class fields — see watable.table_of. It also keeps
+                    # each row under its own cap, independent of where the 1000-char
+                    # comment_body truncation lands.
                     metas.append({
                         "source":         "ticket",
                         "source_id":      issue.key,
                         "key":            issue.key,
+                        **watable.meta_for(c["body"]),
                         "summary":        summary[:200],
                         "step":           step_name,
                         "error":          error_ctx[:200] if error_ctx else "",
@@ -793,6 +871,16 @@ def _ticket_to_text(issue) -> str:
         parts.append(desc_fields)
     if error_ctx:
         parts.append(f"Error: {error_ctx}")
+
+    # BAN-CAN and MSISDN, VERBATIM. Not part of the failure signature — they identify a
+    # customer, and clean_text strips them from anything embedded. They ride along here
+    # only so watable.ticket_fields can fill those two rows of the workaround table for
+    # THIS ticket. They match no step/error pattern, so they don't affect retrieval.
+    desc_raw = getattr(issue.fields, 'description', '') or ''
+    for label in ("BAN-CAN", "MSISDN"):
+        val = watable._raw_field(desc_raw, label.replace("-", "[-\\s]?"))
+        if val:
+            parts.append(f"{label}: {val}")
 
     # Fallback: cleaned summary if we could extract nothing structured
     return '\n'.join(parts) if parts else _clean_for_embed(summary)

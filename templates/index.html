@@ -65,6 +65,20 @@
         </div>
       </div>
 
+      <!-- The resolution comment the ENGINEER posts when closing the ticket — a
+           different artifact from the workaround above, which is why it gets its own
+           box rather than being appended to the answer. -->
+      <div id="template-box" class="result-box hidden" style="margin-top:14px">
+        <div class="result-header">
+          <span>📋 Resolution comment — post this when you close the ticket</span>
+          <span id="template-state" class="badge"></span>
+          <button class="btn-secondary" style="margin-left:auto;padding:4px 12px;font-size:12px"
+                  onclick="copyTemplate(this)">⧉ Copy</button>
+        </div>
+        <div id="template-hint" class="key-hint" style="margin-bottom:8px"></div>
+        <div id="template-text" class="answer-text"></div>
+      </div>
+
       <div id="sources-box" class="sources-box hidden">
         <div class="sources-header">Sources used</div>
         <div id="sources-list"></div>
@@ -124,9 +138,12 @@
     <!-- ── Auto-suggest on inflow tickets ─────────────────────── -->
     <div class="config-section" style="margin-top:28px">
       <h3>🤖 Auto-Suggest on inflow tickets</h3>
-      <p class="subtitle">Periodically scans open Order Fallout tickets and posts a suggested workaround
-        as a Jira comment with 👍/👎 feedback links. It only comments on a confident match, one comment
-        per ticket — and stays silent otherwise.</p>
+      <p class="subtitle">Periodically scans open Order Fallout tickets and leaves two comments on each:
+        the <b>workaround</b> as <code>=== FIX ===</code> steps with 👍/👎 feedback links, and a
+        <b>resolution-format reminder</b> that @-mentions the assignee with the 8-field table pre-filled.
+        One comment of each kind per ticket — both are edited in place, never re-posted. With no confident
+        match it says so and still hands over the blank template (BAN CAN / MSISDN filled in), then
+        upgrades both comments if a matching fix is indexed later.</p>
 
       <div class="rerank-row">
         <label class="switch">
@@ -157,14 +174,19 @@
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:14px">
         <div>
           <label class="field-label">Scan interval</label><br>
-          <select id="js-minutes" class="input-text" style="width:170px">
+          <select id="js-seconds" class="input-text" style="width:170px">
             <option value="0">Off</option>
-            <option value="1" selected>Every 1 min</option>
-            <option value="10">Every 10 min</option>
-            <option value="15">Every 15 min</option>
-            <option value="60">Hourly</option>
-            <option value="1440">Daily</option>
+            <option value="15">Every 15 sec</option>
+            <option value="30" selected>Every 30 sec</option>
+            <option value="60">Every 1 min</option>
+            <option value="300">Every 5 min</option>
+            <option value="600">Every 10 min</option>
+            <option value="3600">Hourly</option>
           </select>
+          <!-- 15s is the floor (jirabot.MIN_INTERVAL_SECONDS): each pass is a JQL search
+               returning every queued issue with its comments, so a faster cadence risks
+               Jira throttling without improving coverage — a skipped ticket is recorded
+               `no_match` and retried on the very next pass. -->
         </div>
         <div style="flex:1;min-width:240px">
           <label class="field-label">Public base URL <span class="muted" style="font-weight:400">(used in the feedback links)</span></label>
@@ -290,7 +312,7 @@
             </label>
             <div>
               <div class="rerank-title">Synthesize === FIX === answer</div>
-              <div class="key-hint">Rewrites the matched resolutions into a clean === FIX === block, grounded in the sources. When off, the best matched comment is shown verbatim.</div>
+              <div class="key-hint">Merges the matched resolutions into one clean === FIX === block, grounded in the sources. When off, the best single match is turned into steps without a model — so the output shape never depends on LLM uptime, only its quality does.</div>
             </div>
           </div>
 
@@ -341,6 +363,46 @@
       <h3>Search Settings</h3>
       <label class="field-label">Top-K results (how many sources to retrieve)</label>
       <input type="number" id="cfg-topk" class="input-text" style="width:80px" min="1" max="20">
+
+      <label class="field-label" style="margin-top:16px">
+        Match threshold (a ticket below this gets NO suggestion)
+      </label>
+      <input type="number" id="cfg-threshold" class="input-text" style="width:90px"
+             min="0.5" max="0.95" step="0.01">
+      <p class="subtitle" style="margin-top:6px">
+        Higher = fewer but safer suggestions. This is the knob behind the
+        “no match” rate — the most common reason an inflow ticket gets nothing.
+      </p>
+    </div>
+
+    <div class="config-section">
+      <h3>Suggested Workaround Format</h3>
+      <p class="subtitle" style="margin:0 0 4px">
+        Every suggestion produces both outputs, so there is nothing to choose here:
+        the <b>workaround</b> is <code>=== FIX ===</code> numbered steps (what you act on),
+        and the <b>resolution comment</b> is the team's 8-field table, pre-filled (what you
+        post when you close the ticket). Both come from one generation, so they can't
+        describe different fixes.
+      </p>
+
+      <label class="field-label" style="margin-top:16px">
+        Sources fed to the LLM (past resolutions merged into one answer)
+      </label>
+      <input type="number" id="cfg-synth-sources" class="input-text" style="width:80px"
+             min="1" max="10">
+      <p class="subtitle" style="margin-top:6px">
+        Individual resolutions are often one line, so several of the same failure
+        corroborate into a complete procedure. Beyond the number of genuinely similar
+        tickets the answer drifts into generic advice — 4 is a good default.
+      </p>
+    </div>
+
+    <div class="config-section">
+      <h3>Embedding Model</h3>
+      <p class="subtitle" style="margin:0">
+        <code id="cfg-embed-model">—</code> · changing this requires a full re-ingest,
+        so it is set in <code>config.json</code> only.
+      </p>
     </div>
 
     <!-- Ollama (local LLM) is no longer a selectable provider — hidden but kept in
@@ -373,6 +435,46 @@ function showTab(name) {
 // Query context + matches, stashed so a 👍/👎 can be scoped to THIS failure.
 let _queryStep = '', _queryError = '', _queryRaw = '', _topMatch = null, _sources = [];
 
+// The 8-field resolution comment to post on closing. Kept separate from the answer
+// because it is not the fix to apply — it's the record of the fix, and it's what makes
+// this failure matchable next time.
+function renderTemplate(r) {
+  const box = document.getElementById('template-box');
+  const tpl = (r.resolution_template || '').trim();
+  if (!tpl) { box.classList.add('hidden'); return; }
+  // A draft built from a real matched fix vs. a blank form on a no-match: the difference
+  // decides whether the user is verifying rows or writing them.
+  const drafted = r.mode === 'strong_match' && !r.declined;
+  document.getElementById('template-text').textContent = tpl;
+  document.getElementById('template-state').textContent = drafted ? 'pre-filled draft' : 'blank template';
+  document.getElementById('template-hint').textContent = drafted
+    ? 'Pre-filled from the workaround above. Verify every row against what you actually did, then post it as your resolution comment.'
+    : 'No fix matched, so only BAN CAN and MSISDN could be filled in. Complete the rest as you work the ticket — yours would be the first indexed resolution for this failure.';
+  box.classList.remove('hidden');
+}
+
+async function copyTemplate(btn) {
+  const text = document.getElementById('template-text').textContent;
+  if (!text) return;
+  const done = () => { const o = btn.textContent; btn.textContent = '✓ Copied';
+                       setTimeout(() => { btn.textContent = o; }, 1400); };
+  try {
+    await navigator.clipboard.writeText(text);
+    done();
+  } catch (e) {
+    // clipboard API needs a secure context; this app is served over plain HTTP on the
+    // internal subnet, so fall back to a selection the user can Ctrl+C.
+    const el = document.getElementById('template-text');
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.addRange(range);
+    if (document.execCommand && document.execCommand('copy')) done();
+    else btn.textContent = 'Press Ctrl+C';
+  }
+}
+
 async function doAsk() {
   const raw = document.getElementById('ask-query').value.trim();
   if (!raw) { alert('Enter a ticket ID, step name, or error description.'); return; }
@@ -402,6 +504,7 @@ async function doAsk() {
   document.getElementById('result-provider').textContent =
     modeBadge + (r.provider && r.provider !== 'direct_match' ? `  •  ${r.provider}/${r.model}` : '')
               + (r.llm_note ? `  •  ⚠️ ${r.llm_note}` : '');
+  renderTemplate(r);
   showEl('ask-result');
 
   // Stash failure context + the match that produced the answer so 👍/👎 votes
@@ -504,6 +607,10 @@ function resetFeedbackGroup(group) {
   if (!group) return;
   group.classList.remove('fb-done');
   group.querySelectorAll('.fb-btn').forEach(b => { b.disabled = false; b.classList.remove('voted'); });
+  // Drop a fix-note box left over from the previous query — the main answer's feedback bar
+  // is reused across searches (source rows are re-rendered wholesale, so they self-clean).
+  const stale = group.parentElement && group.parentElement.querySelector('.fix-note');
+  if (stale) stale.remove();
 }
 
 function markVoted(group, vote) {
@@ -524,12 +631,70 @@ async function sendFeedback(item, vote, group) {
     error:     _queryError,
     query_raw: _queryRaw,
   });
-  if (r.ok) markVoted(group, vote);
-  else alert('Could not save feedback: ' + (r.detail || r.error || 'unknown error'));
+  if (!r.ok) { alert('Could not save feedback: ' + (r.detail || r.error || 'unknown error')); return; }
+  markVoted(group, vote);
+  // The vote is now saved. A 👎 additionally invites the real fix — asked for AFTER the
+  // vote lands, never before, so abandoning the box can't cost the ranking signal.
+  if (vote === 'down') openFixNote(item, group);
 }
 
 function sendFeedbackMain(vote, btn) { sendFeedback(_topMatch, vote, btn.parentElement); }
 function sendFeedbackSrc(i, vote, btn) { sendFeedback(_sources[i], vote, btn.parentElement); }
+
+// ── "What's the actual fix?" — the 👎 follow-up ───────────────────────────────
+// Built in JS and inserted after whichever feedback bar was clicked, so the main answer
+// and every source row share one implementation instead of duplicated markup.
+function openFixNote(item, group) {
+  if (!group || group.parentElement.querySelector('.fix-note')) return;
+  const box = document.createElement('div');
+  box.className = 'fix-note';
+  box.innerHTML =
+    `<div class="fb-label" style="margin-bottom:6px">Do you know the correct fix? Adding it here teaches the tool — optional.</div>
+     <textarea class="input-text fix-note-text" rows="3" style="width:100%"
+       placeholder="What actually fixed it? Plain notes are fine — e.g. &quot;updated the resource id on the order item and retried the step&quot;. Leave out account numbers and MSISDNs."></textarea>
+     <div class="fix-note-actions" style="display:flex;gap:8px;align-items:center;margin-top:6px">
+       <button class="btn-primary" style="padding:5px 14px;font-size:13px">Submit fix</button>
+       <button class="btn-secondary" style="padding:5px 14px;font-size:13px">Skip</button>
+       <span class="fix-note-msg key-hint" style="margin:0"></span>
+     </div>`;
+  group.parentElement.insertBefore(box, group.nextSibling);
+  const ta   = box.querySelector('.fix-note-text');
+  const msg  = box.querySelector('.fix-note-msg');
+  const [submitBtn, skipBtn] = box.querySelectorAll('button');
+  ta.focus();
+
+  skipBtn.onclick = () => box.remove();
+  submitBtn.onclick = async () => {
+    const note = ta.value.trim();
+    if (!note) { box.remove(); return; }
+    submitBtn.disabled = skipBtn.disabled = true;
+    msg.textContent = 'Saving…';
+    const r = await post('/api/suggestions', {
+      note,
+      key:       item.key || item.filename || '',
+      step:      _queryStep,
+      error:     _queryError,
+      query_raw: _queryRaw,
+    });
+    if (!r.ok) {
+      submitBtn.disabled = skipBtn.disabled = false;
+      msg.textContent = '❌ ' + (r.detail || r.error || 'could not save');
+      return;
+    }
+    // Show what will actually be indexed — the rewritten version, not their raw note —
+    // so a bad rewrite is caught here rather than discovered in the index later.
+    const warn = r.note_has_ids
+      ? '<div class="key-hint" style="color:#eab308">⚠️ This looks like it contains an account number or MSISDN. A reviewer will need to strip it.</div>' : '';
+    const flag = (r.note_flag || '').startsWith('llm_says_not_a_fix')
+      ? '<div class="key-hint" style="color:#eab308">⚠️ Saved, but it didn\'t read as a set of fix steps — a reviewer will check it.</div>'
+      : (r.note_flag ? `<div class="key-hint">Saved unrewritten (${escHtml(r.note_flag)}).</div>` : '');
+    box.innerHTML =
+      `<div class="fb-label">✓ Thanks — queued for review. It becomes searchable once approved.</div>
+       ${warn}${flag}
+       <div class="answer-text" style="margin-top:6px">${escHtml(r.synthesized || note)}</div>`;
+    loadPendingSuggestions();
+  };
+}
 
 async function uploadAttachment(input) {
   const file = input.files[0]; if (!file) return;
@@ -594,7 +759,19 @@ async function loadJiraSuggest() {
   document.getElementById('js-enabled').checked  = !!r.enabled;
   document.getElementById('js-live').checked      = !r.dry_run;        // live = NOT dry-run
   document.getElementById('js-jql').value         = r.jql || '';
-  document.getElementById('js-minutes').value     = String(r.minutes ?? 0);
+  // Driven by the EFFECTIVE interval the poller reports, so the dropdown can never
+  // show a cadence that isn't actually in use. An interval saved outside these options
+  // is added on the fly rather than silently snapping to the wrong one.
+  const secs = Number(r.seconds ?? 0);
+  const sel  = document.getElementById('js-seconds');
+  if (![...sel.options].some(o => Number(o.value) === secs)) {
+    const o = document.createElement('option');
+    o.value = String(secs);
+    o.textContent = secs === 0 ? 'Off'
+                  : secs % 60 === 0 ? `Every ${secs / 60} min` : `Every ${secs} sec`;
+    sel.appendChild(o);
+  }
+  sel.value = String(secs);
   // Pre-fill the base URL with the address you're viewing the app at (the link
   // target users need) so you usually never have to type it. Still editable for
   // edge cases (reverse proxy / different external hostname).
@@ -613,7 +790,9 @@ async function loadJiraSuggestPreviews() {
     el.innerHTML = '<div class="muted" style="font-size:13px">No suggestions for today yet — run a scan to preview today\'s inflow.</div>';
     return;
   }
-  const badgeText = { dry_run: 'would comment', posted: 'commented', improved: 'commented (improved)',
+  const badgeText = { dry_run: 'would comment', dry_run_no_match: 'would post template only',
+                      posted: 'commented', improved: 'commented (improved)',
+                      awaiting_match: 'no match yet — template posted',
                       exhausted: 'manual review', llm_deferred: '⏳ LLM rate-limited — check app' };
   el.innerHTML =
     `<div class="sources-header" style="margin-bottom:8px">Today's suggestions — ${items.length} ticket(s)</div>` +
@@ -687,15 +866,22 @@ function renderJiraSuggestStatus(r) {
   badge.style.background = r.dry_run ? '#334155' : '#7f1d1d';
   badge.style.color      = r.dry_run ? '#94a3b8' : '#fca5a5';
 
+  // Cadence from the effective interval, phrased in whichever unit reads naturally —
+  // reporting minutes alone showed "every 0 min" for any sub-minute setting.
+  const secs    = Number(r.seconds ?? 0);
+  const cadence = secs === 0 ? 'off'
+                : secs < 60  ? `every ${secs}s`
+                : secs % 60 === 0 ? `every ${secs / 60} min` : `every ${secs}s`;
+
   const lr = r.last_run || {};
   const el = document.getElementById('js-status');
   if (lr.last_run) {
     const did = lr.dry_run ? `${lr.would_post || 0} would post` : `${lr.posted || 0} posted`;
-    el.innerHTML = `Last run ${new Date(lr.last_run).toLocaleString()} — `
-      + `<b>${did}</b>, ${lr.silent || 0} silent, ${lr.skipped || 0} skipped `
+    el.innerHTML = `Scanning <b>${cadence}</b> · last run ${new Date(lr.last_run).toLocaleString()} — `
+      + `<b>${did}</b>, ${lr.no_match || 0} no match, ${lr.skipped || 0} skipped `
       + `(scanned ${lr.scanned || 0}). Tracking ${r.tracked || 0} ticket(s).`;
   } else {
-    el.textContent = `Tracking ${r.tracked || 0} ticket(s). No run yet.`;
+    el.textContent = `Scanning ${cadence}. Tracking ${r.tracked || 0} ticket(s). No run yet.`;
   }
 }
 
@@ -704,7 +890,7 @@ async function saveJiraSuggest(showSaved) {
     enabled:         document.getElementById('js-enabled').checked,
     dry_run:        !document.getElementById('js-live').checked,
     jql:             document.getElementById('js-jql').value.trim(),
-    minutes:         parseInt(document.getElementById('js-minutes').value, 10),
+    seconds:         parseInt(document.getElementById('js-seconds').value, 10),
     public_base_url: document.getElementById('js-base-url').value.trim(),
   };
   const r = await post('/api/jira-suggest/config', body);
@@ -1082,6 +1268,9 @@ async function loadConfig() {
   document.getElementById('ingest-jql').value     = r.jql       || '';
   document.getElementById('cfg-jira-email').value = r.jira_email || '';
   document.getElementById('cfg-ollama-url').value = r.ollama_url || '';
+  document.getElementById('cfg-threshold').value      = r.score_threshold ?? 0.7;
+  document.getElementById('cfg-synth-sources').value  = r.synthesis_sources || 4;
+  document.getElementById('cfg-embed-model').textContent = r.embed_model || '—';
   _hasToken = r.has_token;
   _applyTokenState(_hasToken, false);
 }
@@ -1115,6 +1304,8 @@ async function saveConfig() {
     top_k:      parseInt(document.getElementById('cfg-topk').value),
     jira_email: document.getElementById('cfg-jira-email').value.trim(),
     ollama_url: document.getElementById('cfg-ollama-url').value.trim(),
+    score_threshold:   parseFloat(document.getElementById('cfg-threshold').value),
+    synthesis_sources: parseInt(document.getElementById('cfg-synth-sources').value),
   };
   const token = document.getElementById('cfg-jira-token').value.trim();
   if (token) body.jira_api_token = token;

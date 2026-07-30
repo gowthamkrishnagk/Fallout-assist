@@ -17,7 +17,8 @@ from pathlib import Path
 import embedder
 import feedback
 import vectordb
-from textclean import clean_text, is_pointer_comment, referenced_ticket
+import watable
+from textclean import clean_text, clean_error_text, is_pointer_comment, referenced_ticket
 
 DEFAULT_THRESHOLD = 0.70   # cosine-similarity scale; live value from config.json (score_threshold)
 
@@ -35,8 +36,9 @@ def _resolution_quality(c: dict) -> float:
     synthesis draws from the best-resolved tickets first instead of an arbitrary
     cosine order. Costs nothing (no network / no Groq quota).
 
-    Rewards: the structured '=== FIX ===' block, numbered/bulleted steps, and
-    substance. Penalizes one-word closers ('done', 'fixed') and very short text.
+    Rewards: the team's 8-field workaround table, the structured '=== FIX ===' block,
+    numbered/bulleted steps, and substance. Penalizes one-word closers ('done',
+    'fixed') and very short text.
     """
     if c.get("type") == "doc":
         return 3.0   # uploaded docs are curated workarounds — treat as solid
@@ -44,6 +46,22 @@ def _resolution_quality(c: dict) -> float:
     if not body:
         return 0.0
     score = 0.0
+    # The 8-field table is the CURRENT resolution format and the richest thing in the
+    # corpus — a named cause, the action, the system touched and the follow-up. Without
+    # this it scored ~2.0 (no === FIX ===, no numbered steps) and ranked below far
+    # thinner prose resolutions, which is backwards.
+    #
+    # Rows come from what ingest already parsed (table_of), so this costs no parsing. Only
+    # the CONTENT rows are counted — Cause / Solution applied / System modified / Customer
+    # action / Category. The ticket-owned rows are filled from the description on every
+    # table ever written, so counting them measured nothing and flattered a table whose
+    # actual content rows were blank. A fully-filled table still tops out at +2.0.
+    table = watable.table_of(c)
+    if table:
+        score += 5.0
+        score += min(sum(1 for f, v in table.items()
+                         if f not in watable.TICKET_FIELDS and watable.clean_value(v)),
+                     5) * 0.4                               # content rows filled in
     if "=== fix ===" in body.lower():
         score += 5.0                                   # follows the resolution format
     steps = len(re.findall(r'(?m)^\s*(?:\d+[.)]|[-*•])\s+\S', body))
@@ -155,6 +173,10 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset(),
             comment = meta.get("comment_body", h["doc"])
             url     = meta.get("url", "")
             author  = meta.get("comment_author", "")
+            # True while `meta` still describes `comment`. The live-Jira pointer branch
+            # below breaks that: it keeps the pointer's metadata but swaps in the
+            # referenced ticket's body, so the stored table rows would be the wrong ones.
+            meta_fits = True
 
             # A pointer comment ("duplicate, refer to SAC-231619") is not a fix.
             # Resolve it to the referenced ticket's real resolution — from the index
@@ -182,6 +204,7 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset(),
                     key, comment = fetched["key"], fetched["comment"]
                     url, author  = fetched["url"], fetched.get("author", "")
                     # keep meta (the duplicate's step/error/summary — same failure)
+                    meta_fits = False
                 if key in seen_tickets or (key and key.upper() in exclude_keys):
                     continue
 
@@ -194,7 +217,16 @@ def find_workarounds(query: str, cfg: dict, exclude_keys=frozenset(),
                 "url":         url,
                 "assignee":    meta.get("assignee", ""),
                 "author":      author,
+                # Whether this comment is the ASSIGNEE's own (83% of the corpus). The
+                # remaining 17% come from the resolver/any-human fallback — a shift
+                # handover or escalation. Carried through so synthesis can weight the
+                # engineer who actually worked the ticket above a bystander's note.
+                "is_assignee": meta.get("is_assignee", ""),
                 "comment":     comment,
+                # The 8-field table rows, parsed ONCE at ingest. Empty for a prose
+                # resolution and for a live-fetched pointer target; `watable.table_of`
+                # falls back to parsing the body in both cases.
+                "table":       watable.from_meta(meta) if meta_fits else {},
                 "description": meta.get("description", ""),
                 "order_type":  meta.get("order_type", ""),
                 "order_reason": meta.get("order_reason", ""),
@@ -616,10 +648,14 @@ def _extract_fields(text: str):
     error_match = re.search(r'(\d{1,6}\s*\|[^\n]{3,150})', text)
     if not error_match:
         error_match = re.search(
-            r'Error(?:\s+Description)?\s*:\s*([^\n]{3,200})',
+            r'Error(?:\s+(?:Description|Code))?\s*:\s*([^\n]{1,200})',
             text, re.IGNORECASE
         )
-    error = _clean_query(error_match.group(1).strip()) if error_match else ''
+    # clean_error_text, not _clean_query: the leading code must survive on the QUERY
+    # side too, or a 6-digit code is stripped here while ingest keeps it and the two
+    # sides stop matching. Also matches an 'Error Code:' label, which the old pattern
+    # missed entirely.
+    error = clean_error_text(error_match.group(1).strip()) if error_match else ''
 
     return step, error, _clean_query(text)
 
@@ -706,7 +742,138 @@ def select_resolution(strong: list) -> dict | None:
     return strong[0] if strong else None
 
 
-def build_prompt(query: str, result: dict) -> str:
+# Jira media embeds — "!image-20260320-124732.png|width=687,alt="..."!" — and attachment
+# links "[^file.png]". A comment that is ONLY a screenshot carries no actions (119 such
+# chunks in the corpus) and would silently consume a synthesis slot.
+_JIRA_MEDIA_RE  = re.compile(
+    r'!\s*[^!\n]*?\.(?:png|jpe?g|gif|bmp|svg|pdf|docx?|xlsx?)[^!\n]*!?', re.IGNORECASE)
+_JIRA_ATTACH_RE = re.compile(r'\[\^[^\]\n]+\]')
+
+# Workflow / status notes that _NON_RESOLUTION_RE deliberately does NOT catch, because it
+# is anchored to the WHOLE comment (^...$). These have trailing text, so they slip past:
+#   "SLA Breached. Reason: Request from L3 to Hold"
+#   "Bulk resolved - Nokia Delete Line Order Fallout"
+# Both were observed occupying a synthesis slot.
+_STATUS_NOTE_RE = re.compile(
+    r'(?i)^\W*(?:'
+    r'sla\s+breach\w*'
+    r'|bulk\s+(?:resolved|closed|updated|completed)'
+    r'|(?:on|placed\s+on|kept\s+on|keeping\s+on)\s+hold'
+    r'|request\s+from\s+l\d'
+    r'|waiting\s+(?:for|on)\b'
+    r'|pending\s+(?:from|with|on)\b'
+    r'|reopened\b'
+    r'|will\s+(?:check|update|verify|revert)\b'
+    r')')
+
+# Stopwords matter for near-duplicate detection because resolutions are terse: 'retried
+# the step' vs 'retried the order' share two of three tokens on stopwords alone, which
+# would make two different fixes look like restatements of each other.
+_STOPWORDS = frozenset("""the a an and or of to in on for is was be been being it its this
+that these those with as at by from we i he she they you please kindly so then now have
+has had do does did can could should would will shall not no yes ok okay after before
+again per via out up""".split())
+
+
+def _strip_media(body: str) -> str:
+    """Drop Jira image/attachment markup, keeping the prose around it.
+
+    Applied both when judging a source and when rendering it into the prompt: a
+    screenshot is invisible to the model, so the markup is pure noise it would otherwise
+    have to be instructed to ignore, and it burns tokens for nothing. Blank runs left
+    behind are collapsed so the body reads as written."""
+    out = _JIRA_ATTACH_RE.sub(' ', _JIRA_MEDIA_RE.sub(' ', body or ''))
+    return re.sub(r'\n\s*\n+', '\n\n', out).strip()
+
+
+def _content_tokens(body: str) -> frozenset:
+    """Content words of a resolution — canonically cleaned, lowercased, stopwords and
+    single characters dropped. The unit of comparison for near-duplicate detection."""
+    toks = re.findall(r'[a-z0-9]+', clean_text(body or "").lower())
+    return frozenset(t for t in toks if len(t) > 1 and t not in _STOPWORDS)
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def _is_unusable_source(body: str) -> bool:
+    """True when a comment cannot contribute ACTIONS to a synthesized workaround.
+
+    Deliberately stricter than _is_non_resolution. This only decides which sources fill
+    the synthesis slots, so over-filtering merely means fewer sources — whereas
+    _is_non_resolution also gates the raw comment shown to a user when the LLM declines,
+    where over-filtering would change user-visible output.
+
+    Rejects: empty, whatever _is_non_resolution already rejects, workflow/status notes,
+    pointer comments ('duplicate, refer to SAC-x' — the follow-reference logic upstream
+    has already resolved those to a real fix or dropped them), and bodies that are only
+    an image/attachment embed."""
+    b = (body or "").strip()
+    if not b or _is_non_resolution(b):
+        return True
+    if _STATUS_NOTE_RE.match(b.splitlines()[0].strip().strip('*').strip()):
+        return True
+    if is_pointer_comment(b):
+        return True
+    # Only treat thin text as unusable when media markup was actually present — a terse
+    # but real fix ("reprocessed") has few content tokens too and MUST be kept, since
+    # over half the corpus is under 60 characters.
+    stripped = _strip_media(b)
+    if stripped != b and len(_content_tokens(stripped)) < 3:
+        return True
+    return False
+
+
+# Two sources saying the same thing is CORROBORATION (the whole point of multi-source);
+# five is waste. Admit near-duplicates up to _NEAR_DUP_ALLOW, then require later slots to
+# bring something new. Threshold is deliberately loose — wrongly collapsing two distinct
+# fixes loses information, while keeping one paraphrase only costs a few tokens.
+_NEAR_DUP_SIM   = 0.65
+_NEAR_DUP_ALLOW = 2
+
+
+def select_resolutions(strong: list, limit: int) -> list:
+    """The top `limit` strong matches that are ACTUAL workarounds, best rank first.
+
+    Multi-source on purpose. The median stored resolution is ~56 characters
+    ("reprocessed", "retried the step") and over half are under 60, so ONE comment is
+    usually too thin to synthesize a real procedure from. Several resolutions of the
+    SAME failure corroborate each other — one names the step, another the field to
+    change, a third the order to do them in — and the retriever is accurate enough
+    (93.6% Hit@1) that the strong set is genuinely the same failure, not a grab bag.
+
+    Slots are scarce, so what fills them matters more than how many there are. Two
+    filters keep the extra sources signal rather than noise:
+      - _is_unusable_source drops chatter, workflow/status notes, pointer comments and
+        screenshot-only bodies outright — they contribute no actions, and with 4 slots a
+        wasted one is 25% of the evidence;
+      - restatements are capped, not banned: identical content is dropped, and
+        near-duplicates are admitted only up to _NEAR_DUP_ALLOW, so slot 3+ has to bring
+        something new instead of a fourth rewording of "retried the step".
+
+    Falls back to [strong[0]] when EVERY candidate is unusable, preserving the previous
+    behaviour: the model sees it, recognises it isn't a fix, and returns the sentinel."""
+    picked, seen, dups = [], [], 0
+    for c in strong:
+        body = (c.get("comment") or "").strip()
+        if _is_unusable_source(body):
+            continue
+        toks = _content_tokens(body)
+        if not toks or any(toks == p for p in seen):
+            continue                       # nothing to add / exact restatement
+        if any(_jaccard(toks, p) >= _NEAR_DUP_SIM for p in seen):
+            if dups >= _NEAR_DUP_ALLOW:
+                continue                   # enough corroboration already
+            dups += 1
+        seen.append(toks)
+        picked.append(c)
+        if len(picked) >= max(1, limit):
+            break
+    return picked or (strong[:1] if strong else [])
+
+
+def build_prompt(query: str, result: dict, cfg: dict | None = None) -> str:
     """Prompt the LLM to produce a grounded workaround in the `=== FIX ===`
     format — a clean, paste-ready resolution comment — WITHOUT hallucinating.
 
@@ -719,25 +886,40 @@ def build_prompt(query: str, result: dict) -> str:
         applicable fix it must reply exactly NO_RELIABLE_WORKAROUND, so the caller
         shows the raw best comment instead of a made-up one.
 
+    MULTI-SOURCE: several strong matches are passed, not one. Individual resolutions
+    are terse (median ~56 chars), so corroborating same-failure comments is what makes
+    a complete procedure possible — see select_resolutions. Each source carries its OWN
+    Failed Step / Error so the model can verify it really describes the query's failure
+    instead of trusting the ranker blindly, and is told how to merge them.
+
     Feedback-aware: each source is tagged with the human 👍/👎 it earned for THIS
-    failure (from feedback.py), and the model is told to prefer VERIFIED/confirmed
-    sources and steer away from ones marked wrong — so accumulated feedback raises
-    the quality of the generated workaround, not just the ordering.
+    failure (from feedback.py), plus whether the author was the ticket's ASSIGNEE (the
+    engineer who actually worked it, 83% of the corpus). The model is told to prefer
+    VERIFIED/confirmed sources and steer away from ones marked wrong — so accumulated
+    feedback raises the quality of the generated workaround, not just the ordering.
     """
-    # Feed the LLM only the single most relevant REAL workaround — skip status chatter
-    # (e.g. 'fixed by L3') so a genuine fix ranked just below it isn't lost.
-    top    = select_resolution(result["strong"])
-    strong = [top] if top else []
+    strong, sources, has_verified = render_sources(result, cfg)
+    return _assemble_prompt(query, strong, sources, has_verified)
+
+
+def render_sources(result: dict, cfg: dict | None = None) -> tuple[list, str, bool]:
+    """(picked_sources, rendered_source_block, any_verified) for a search result.
+
+    Shared by both synthesis formats — the `=== FIX ===` prompt and the 8-field table
+    prompt in watable.py — so a workaround is grounded in exactly the same evidence
+    whichever output format is configured."""
+    limit  = int((cfg or {}).get("workaround_finder", {}).get("synthesis_sources", 4) or 4)
+    strong = select_resolutions(result["strong"], limit)
 
     sources    = ""
     has_verified = False
     for i, h in enumerate(strong, 1):
         if h["type"] == "ticket":
             label = f"{h['key']} (score {h['score']:.2f}) — comment by {h['author']}"
-            body  = h["comment"]
+            if str(h.get("is_assignee")) == "True":
+                label += " [ASSIGNEE — the engineer this ticket was assigned to]"
         else:
             label = f"Doc '{h['filename']}' (score {h['score']:.2f})"
-            body  = h["comment"]
         # Human feedback signal for this source on this failure.
         net = h.get("feedback_net", 0)
         if h.get("curated"):
@@ -747,15 +929,52 @@ def build_prompt(query: str, result: dict) -> str:
             label += f"  [👍 confirmed helpful {net}×]"
         elif net < 0:
             label += f"  [👎 marked wrong {-net}× — use only if clearly applicable]"
-        sources += f"\n--- Source {i}: {label} ---\n{body[:600]}\n"
+        # The source's OWN failure, so a mis-ranked source can be recognised and
+        # ignored rather than silently merged into the answer.
+        ctx = ""
+        if h.get("step"):
+            ctx += f"Its Failed Step: {h['step']}\n"
+        if h.get("error"):
+            ctx += f"Its Error: {h['error']}\n"
+        # 1000 matches the stored comment_body cap, so nothing retrievable is cut here.
+        sources += (f"\n--- Source {i}: {label} ---\n{ctx}"
+                    f"Resolution:\n{_strip_media(h['comment'])[:1000]}\n")
 
+    has_feedback = bool(any(h.get("feedback_net") for h in strong) or has_verified)
+    return strong, sources, has_feedback
+
+
+def _assemble_prompt(query: str, strong: list, sources: str, has_verified: bool) -> str:
+    """The `=== FIX ===` prompt proper, given an already-rendered source block."""
     feedback_rule = (
         "- Sources are tagged with human feedback. PREFER steps from VERIFIED / "
         "👍-confirmed sources, and avoid relying on a 👎 source unless it is the only "
         "one that clearly fits.\n"
-        if any(h.get("feedback_net") for h in strong) or has_verified else ""
+        if has_verified else ""
     )
 
+    plural = len(strong) > 1
+    merge_rule = (
+        "- The sources are DIFFERENT past tickets that hit the SAME failure. Merge them "
+        "into ONE procedure: keep the actions they agree on, and where they conflict "
+        "prefer the higher-scored source, then a VERIFIED/👍 one, then an ASSIGNEE one.\n"
+        "- Each source shows its own Failed Step / Error. IGNORE any source whose own "
+        "failure clearly differs from the issue above, even though it was retrieved.\n"
+        "- Output ONE merged procedure. Do NOT write a section per source and do NOT "
+        "repeat the same action twice.\n"
+        if plural else ""
+    )
+    no_fix_rule = (
+        f"- If NONE of the sources contain a real workaround — they are only "
+        f"acknowledgements or status notes like 'already activated', 'fixed by L3', "
+        f"'handled by L2', 'done', questions, or bare 'fixed/closed' with no concrete "
+        f"actions — reply with exactly: {NO_FIX_SENTINEL}\n"
+        if plural else
+        f"- If this comment is NOT a real workaround — e.g. an acknowledgement or status "
+        f"note like 'already activated', 'fixed by L3', 'handled by L2', 'done', a "
+        f"question, or a bare 'fixed/closed' with no concrete actions — reply with "
+        f"exactly: {NO_FIX_SENTINEL}\n"
+    )
     return (
         "You are a Salesforce order-fallout support assistant. A new issue needs a "
         "workaround:\n\n"
@@ -771,18 +990,44 @@ def build_prompt(query: str, result: dict) -> str:
         "@mentions like [~accountid:...], ticket/PR links and URLs, MSISDNs / order IDs / "
         "record IDs, and any 'please check / can you look into this' chatter. Keep only "
         "the actual resolution actions.\n"
+        f"{merge_rule}"
         f"{feedback_rule}"
-        f"- If this comment is NOT a real workaround — e.g. an acknowledgement or status "
-        f"note like 'already activated', 'fixed by L3', 'handled by L2', 'done', a "
-        f"question, or a bare 'fixed/closed' with no concrete actions — reply with "
-        f"exactly: {NO_FIX_SENTINEL}\n"
+        f"{no_fix_rule}"
         f"{sources}\n"
-        "Output EXACTLY this block and nothing else (omit the Root Cause line if the "
+        "Output EXACTLY this, and nothing else (omit the Root Cause line if the "
         "sources don't state a cause):\n"
         "=== FIX ===\n"
         "Root Cause: <one line, only if supported by the sources>\n"
         "1. <first action, imperative>\n"
         "2. <next action, imperative>\n"
         "3. <continue as needed>\n"
-        "=== END ==="
+        "=== END ===\n"
+        f"System modified: <which system the steps CHANGE: {watable._SYSTEM_CHOICES}, "
+        "or NA>\n"
+        "Customer action: <what the agent/customer does next to verify, or NA>"
     )
+
+
+# The two labelled lines requested after `=== END ===`. They exist so ONE generation can
+# fill the prefilled resolution table as well as the steps block — 'System modified' and
+# 'Customer action' are table rows with no place inside a numbered procedure, and a second
+# LLM call to get them would double the cost and let the two artifacts disagree.
+_TRAILING_FIELDS = re.compile(
+    r'(?:^|\n)[ \t*_]*(system(?:s)?[ \t]+modified|customer[ \t]+action)[ \t]*:',
+    re.IGNORECASE)
+
+
+def split_fix_answer(answer: str) -> tuple[str, dict]:
+    """(fix_block, {table field: value}) for a synthesis reply.
+
+    The block is what gets shown/posted as the workaround; the trailing metadata lines
+    only feed the resolution-comment draft, so they are cut out of the visible answer.
+    A model that ignored the trailing lines simply yields an empty dict."""
+    text = (answer or "").strip()
+    if not text or NO_FIX_SENTINEL in text:
+        return text, {}
+    m = _TRAILING_FIELDS.search(text)
+    if not m:
+        return text, {}
+    block, trailing = text[:m.start()].strip(), text[m.start():]
+    return (block or text), watable.parse_llm_fields(trailing)

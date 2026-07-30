@@ -420,8 +420,13 @@ def _synapt(prompt: str, model: str) -> dict:
         resp = httpx.post(
             url,
             headers={"api-key": api_key},
+            # max_tokens was previously unset, leaving the completion length to the
+            # deployment default — a long merged workaround could be cut mid-step.
+            # 1024 comfortably covers a === FIX === block; the 128k context is not the
+            # constraint (our prompt is ~1-3k tokens).
             json={"messages": [{"role": "user", "content": prompt}],
-                  "temperature": 0.2},
+                  "temperature": 0.2,
+                  "max_tokens": 1024},
             timeout=60,
         )
         if resp.status_code == 429:

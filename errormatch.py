@@ -23,13 +23,14 @@ from textclean import clean_text
 _CODE_RE = re.compile(r'^[\s*•·▪◦\-|>]*(\d{1,6})\s*\|')
 _TOKEN   = re.compile(r'[a-z0-9]+')
 
-# Volatile per-occurrence junk that survives textclean.clean_text but differs between
-# two copies of the SAME error, so it must not enter the message comparison:
-#   - timestamps ("6/3/2026 9:07 AM") in the FATAL orchestration dumps
+# Volatile per-occurrence junk that differs between two copies of the SAME error, so it
+# must not enter the message comparison:
+#   - timestamps ("6/3/2026 9:07 AM") in the FATAL orchestration dumps. textclean.clean_text
+#     now strips these too (they were splitting one failure into N singletons), but the
+#     pattern is KEPT here as well: the live index still holds values embedded before that
+#     change, and the lexical matcher reads those stored values directly.
 #   - Salesforce record IDs that start with a LETTER ("a5oPl00000H3QAqIAN") — clean_text
 #     only strips digit-leading ones. 15- or 18-char alphanumeric containing a digit.
-# Stripped only here (for the lexical match), NOT in the shared cleaner — so it changes
-# no embeddings and needs no re-ingest.
 _DATETIME = re.compile(
     r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\b',
     re.IGNORECASE)

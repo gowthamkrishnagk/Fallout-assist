@@ -19,6 +19,7 @@ demand, skipping buckets too large to be a meaningful "same failure" cluster.
 
 import re
 import vectordb
+from textclean import clean_text, clean_error_text
 
 _cache: dict = {}   # index_path -> {count, key_sigs, sig_keys, ptr_adj, key_ids}
 
@@ -32,8 +33,19 @@ def _norm(s: str) -> str:
 
 
 def _sig(meta: dict) -> str:
-    step = _norm(meta.get("step", ""))
-    err  = _norm(meta.get("error", ""))
+    """Failure signature — the canonical (step, error) pair.
+
+    Runs the values through the SHARED cleaner, not a bare lowercase. _norm() alone left
+    timestamps and letter-glued MSISDNs in place, so two tickets hitting the same failure
+    landed in different buckets ('...MobileVoice17875170498...' vs
+    '...MobileVoice17873782225...'). Measured effect of that: 1320 buckets of which 989
+    held a SINGLE ticket, so expand() found no siblings for most queries and this whole
+    layer did nothing. On the canonical cleaner: 683 buckets, 363 singletons.
+
+    clean_error_text rather than clean_text for the error, so a leading 'code |' survives
+    — the code is the sharpest discriminator we have and must stay part of the signature."""
+    step = _norm(clean_text(meta.get("step", "")))
+    err  = _norm(clean_error_text(meta.get("error", "")))
     if not step and not err:
         return ""
     return f"{step}||{err}"
