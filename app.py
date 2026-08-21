@@ -3,6 +3,7 @@ Workaround Finder — FastAPI app
 Run: uvicorn app:app --reload --port 8010
 """
 
+import hashlib
 import json
 import os
 import re
@@ -20,9 +21,10 @@ except Exception as _e:   # truststore missing or unsupported → fall back to c
     print(f"[TLS] truststore not active ({_e}); using default certifi bundle")
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv()
 
@@ -31,6 +33,46 @@ CONFIG_PATH = _DIR / "config.json"
 
 app = FastAPI(title="FalloutAssist")
 app.mount("/static", StaticFiles(directory=str(_DIR / "static")), name="static")
+
+
+def _session_secret() -> str:
+    """Stable key for signing the login session cookie. Prefer SESSION_SECRET;
+    otherwise derive a deterministic key from the Jira token so sessions survive
+    restarts without extra config — same fallback pattern as jirabot._secret()."""
+    s = os.getenv("SESSION_SECRET", "").strip()
+    if s:
+        return s
+    tok = os.getenv("JIRA_API_TOKEN", "") or "fa-default-secret"
+    return hashlib.sha256(("fa-session-fallback:" + tok).encode()).hexdigest()
+
+
+app.add_middleware(SessionMiddleware, secret_key=_session_secret(),
+                    session_cookie="fa_session", same_site="lax")
+
+
+# ── Auth: who's signed in, and are they an admin ─────────────────────────────
+
+def current_user(request: Request) -> dict | None:
+    """The signed-in user (no password hash), or None if signed out / unknown session."""
+    uid = request.session.get("uid")
+    if not uid:
+        return None
+    import auth
+    return auth.get_by_id(uid, load_config())
+
+
+def require_login(request: Request) -> dict:
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "sign in required")
+    return user
+
+
+def require_admin(request: Request) -> dict:
+    user = require_login(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "admin role required")
+    return user
 
 
 def load_config() -> dict:
@@ -169,10 +211,50 @@ def index():
     return (_DIR / "templates" / "index.html").read_text(encoding="utf-8")
 
 
+# ── Auth: register / login / logout / who-am-i ───────────────────────────────
+# The page itself still loads for everyone (the login form is part of it) — every
+# other route below is what actually requires a session.
+
+@app.post("/api/auth/register")
+def auth_register(body: dict, request: Request):
+    import auth
+    cfg = load_config()
+    try:
+        user = auth.register(body.get("email", ""), body.get("password", ""), cfg)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    request.session["uid"] = user["id"]
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/auth/login")
+def auth_login(body: dict, request: Request):
+    import auth
+    cfg  = load_config()
+    user = auth.authenticate(body.get("email", ""), body.get("password", ""), cfg)
+    if not user:
+        raise HTTPException(401, "invalid email or password")
+    request.session["uid"] = user["id"]
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    """Always 200 — {"user": null} is the signed-out state, not an error, so the
+    page's own JS can check this on load without a try/catch."""
+    return {"ok": True, "user": current_user(request)}
+
+
 # ── Jira ingest ───────────────────────────────────────────────────────────────
 
 @app.post("/api/ingest/preview")
-def ingest_preview(body: dict):
+def ingest_preview(body: dict, user: dict = Depends(require_login)):
     import ingest as ing
     jql = body.get("jql", "").strip()
     if not jql:
@@ -182,7 +264,7 @@ def ingest_preview(body: dict):
 
 
 @app.post("/api/ingest/start")
-def ingest_start(body: dict):
+def ingest_start(body: dict, admin: dict = Depends(require_admin)):
     import ingest as ing
     if not _try_acquire():
         return JSONResponse({"ok": False, "status": "already_running"}, status_code=409)
@@ -220,7 +302,7 @@ def ingest_start(body: dict):
 
 
 @app.get("/api/ingest/status")
-def ingest_status():
+def ingest_status(user: dict = Depends(require_login)):
     import ingest as ing
     cfg = load_config()
     s   = ing.get_status(cfg)
@@ -229,7 +311,7 @@ def ingest_status():
 
 
 @app.get("/api/scorecard")
-def scorecard_status():
+def scorecard_status(user: dict = Depends(require_login)):
     """Latest auto-graded accuracy (self-test, feedback-free) + recent history for a
     sparkline. Refreshes automatically after each ingest."""
     import json, scorecard
@@ -242,7 +324,7 @@ def scorecard_status():
 
 
 @app.get("/api/ingest/schedule")
-def ingest_schedule_get():
+def ingest_schedule_get(admin: dict = Depends(require_admin)):
     """Current background auto-ingest schedule."""
     wf = load_config()["workaround_finder"]
     return {
@@ -254,7 +336,7 @@ def ingest_schedule_get():
 
 
 @app.post("/api/ingest/schedule")
-def ingest_schedule_set(body: dict):
+def ingest_schedule_set(body: dict, admin: dict = Depends(require_admin)):
     """Set the background auto-ingest cadence (persisted to config.json).
     minutes=0 disables it. Common: 10 (10 min), 60 (hourly), 1440 (daily).
     Takes effect within ~1 minute — no restart needed."""
@@ -273,7 +355,7 @@ def ingest_schedule_set(body: dict):
 # ── Ask ───────────────────────────────────────────────────────────────────────
 
 @app.post("/api/ask")
-async def ask(body: dict):
+async def ask(body: dict, user: dict = Depends(require_login)):
     import ingest as ing
     import suggest
 
@@ -312,7 +394,7 @@ async def ask(body: dict):
 # ── Feedback (👍/👎 → re-ranking signal) ───────────────────────────────────────
 
 @app.post("/api/feedback")
-def feedback_record(body: dict):
+def feedback_record(body: dict, user: dict = Depends(require_login)):
     """Record a 👍 (correct) / 👎 (wrong) vote on a suggested workaround. Scoped to
     (workaround identity, failure) so it trains ranking for that step+error only.
     The vote itself is a pure runtime signal — it does not touch the index.
@@ -347,12 +429,12 @@ def feedback_record(body: dict):
         # The vote is already saved above, so anything below costs the note, never the
         # training signal.
         out.update(_queue_fix_note(note, key, step, error,
-                                   body.get("query_raw", ""), cfg))
+                                   body.get("query_raw", ""), cfg, user["email"]))
     return out
 
 
 def _queue_fix_note(note: str, disliked_key: str, step: str, error: str,
-                    query_raw: str, cfg: dict) -> dict:
+                    query_raw: str, cfg: dict, submitted_by: str = "") -> dict:
     """Rewrite an agent's 'here's the real fix' note and queue it for review.
 
     Shared by /api/feedback (one-shot: vote + note together) and /api/suggestions (the
@@ -370,7 +452,8 @@ def _queue_fix_note(note: str, disliked_key: str, step: str, error: str,
         srec = sg.add(step, error, source_key=(query_raw or "")[:80],
                       disliked_key=disliked_key, suggestion=syn["body"], cfg=cfg,
                       origin="app_dislike", raw=syn["raw"],
-                      synth={k: syn[k] for k in ("provider", "model", "flag", "has_ids")})
+                      synth={k: syn[k] for k in ("provider", "model", "flag", "has_ids")},
+                      submitted_by=submitted_by)
         print(f"[FEEDBACK] 👎 on {disliked_key} + fix note -> pending suggestion "
               f"{srec['id']} (flag={syn['flag'] or 'none'})")
         return {"note_status": "pending", "suggestion_id": srec["id"],
@@ -382,7 +465,7 @@ def _queue_fix_note(note: str, disliked_key: str, step: str, error: str,
 
 
 @app.post("/api/suggestions")
-def suggestions_submit(body: dict):
+def suggestions_submit(body: dict, user: dict = Depends(require_login)):
     """An agent's corrected fix, submitted after a 👎 in the app.
 
     Separate from /api/feedback because the vote fires on the FIRST click (so it is never
@@ -394,7 +477,7 @@ def suggestions_submit(body: dict):
     cfg = load_config()
     out = _queue_fix_note(note, (body.get("key", "") or "").strip(),
                           body.get("step", ""), body.get("error", ""),
-                          body.get("query_raw", ""), cfg)
+                          body.get("query_raw", ""), cfg, user["email"])
     status = out.get("note_status", "")
     if status.startswith("failed"):
         raise HTTPException(500, status)
@@ -408,8 +491,9 @@ def suggestions_submit(body: dict):
 # ── User-submitted workarounds: pending review + approval ─────────────────────
 
 @app.get("/api/suggestions/pending")
-def suggestions_pending():
-    """User-submitted fixes (from the in-Jira feedback fields) awaiting review."""
+def suggestions_pending(admin: dict = Depends(require_admin)):
+    """User-submitted fixes (from the in-Jira feedback fields) awaiting review.
+    Admin-only — this is the approval queue, not a general activity feed."""
     import suggestions as sg
     cfg = load_config()
     if not cfg["workaround_finder"].get("suggestions_enabled", True):
@@ -418,9 +502,10 @@ def suggestions_pending():
 
 
 @app.post("/api/suggestions/{sid}/approve")
-def suggestions_approve(sid: str):
+def suggestions_approve(sid: str, admin: dict = Depends(require_admin)):
     """Approve a pending suggestion → embed it into the searchable index as a
-    verified user fix, then mark it approved."""
+    verified user fix, then mark it approved. Admin-only: this is the gate that
+    decides what becomes a trusted, indexed workaround for everyone else."""
     import suggestions as sg
     import ingest as ing
     cfg = load_config()
@@ -433,19 +518,89 @@ def suggestions_approve(sid: str):
                                 rec.get("suggestion", ""), sid, cfg)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error", "could not index suggestion"))
-    sg.set_status(sid, "approved", cfg, indexed_id=res["indexed_id"])
+    sg.set_status(sid, "approved", cfg, indexed_id=res["indexed_id"],
+                  approved_by=admin["email"])
     return {"ok": True, "indexed_id": res["indexed_id"]}
 
 
 @app.post("/api/suggestions/{sid}/reject")
-def suggestions_reject(sid: str):
+def suggestions_reject(sid: str, admin: dict = Depends(require_admin)):
     import suggestions as sg
     cfg = load_config()
     rec = sg.get(sid, cfg)
     if not rec:
         raise HTTPException(404, "suggestion not found")
-    sg.set_status(sid, "rejected", cfg)
+    sg.set_status(sid, "rejected", cfg, approved_by=admin["email"])
     return {"ok": True}
+
+
+# ── Deterministic workaround rules (exact-match, reviewed) ───────────────────
+# Distinct from the suggestions queue above: a suggestion gets embedded and found by
+# similarity later (a score, never guaranteed); a rule's error_description either
+# matches the incoming failure exactly or it doesn't — see rules.py and
+# suggest.suggest_for_query, which checks these before falling back to search.
+
+@app.get("/api/rules")
+def rules_list(status: str = "", user: dict = Depends(require_login)):
+    import rules as rl
+    cfg = load_config()
+    return {"ok": True, "rules": rl.list_rules(cfg, status=status)}
+
+
+@app.post("/api/rules")
+def rules_create(body: dict, user: dict = Depends(require_login)):
+    """Propose a new rule (draft) — any signed-in user; mirrors /api/suggestions."""
+    import rules as rl
+    cfg   = load_config()
+    match = body.get("match") or {}
+    try:
+        rec = rl.create(match, body.get("workaround_text", ""), user["email"], cfg)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "rule": rec}
+
+
+@app.post("/api/rules/{rule_id}/approve")
+def rules_approve(rule_id: str, admin: dict = Depends(require_admin)):
+    """Admin-only. Refuses (409) when the rule would be genuinely ambiguous against
+    an already-approved rule — narrow one of the two, or merge them, before retrying."""
+    import rules as rl
+    cfg  = load_config()
+    rule = rl.get(rule_id, cfg)
+    if not rule:
+        raise HTTPException(404, "rule not found")
+    if rule.get("status") == "approved":
+        raise HTTPException(409, "rule is already approved")
+    conflicts = rl.check_overlap(rule.get("match", {}), cfg, exclude_id=rule_id)
+    if conflicts:
+        raise HTTPException(409, {
+            "message": "would be ambiguous against an already-approved rule",
+            "conflicts": [{"id": c["id"], "workaround_text": c["workaround_text"][:200]}
+                          for c in conflicts],
+        })
+    updated = rl.approve(rule_id, admin["email"], cfg)
+    return {"ok": True, "rule": updated}
+
+
+@app.post("/api/rules/clean-preview")
+def rules_clean_preview(body: dict, user: dict = Depends(require_login)):
+    """The exact string a rule's error_description pattern is tested against —
+    error_matches cleans with the same function before matching (see rules.py's module
+    docstring for why). Lets the Rules tab's pattern tester show the real thing instead
+    of the raw text, which almost never matches (hyphens become spaces, etc.)."""
+    import textclean as tc
+    return {"ok": True, "cleaned": tc.clean_error_text(body.get("text", ""))}
+
+
+@app.post("/api/rules/{rule_id}/deprecate")
+def rules_deprecate(rule_id: str, admin: dict = Depends(require_admin)):
+    import rules as rl
+    cfg  = load_config()
+    rule = rl.get(rule_id, cfg)
+    if not rule:
+        raise HTTPException(404, "rule not found")
+    updated = rl.deprecate(rule_id, cfg)
+    return {"ok": True, "rule": updated}
 
 
 # ── Jira auto-suggest: feedback links + poller ────────────────────────────────
@@ -745,13 +900,13 @@ def feedback_details_page(key: str = "", cand: str = "", sig: str = ""):
 
 
 @app.get("/api/jira-suggest/status")
-def jira_suggest_status():
+def jira_suggest_status(user: dict = Depends(require_login)):
     import jirabot
     return jirabot.get_status(load_config())
 
 
 @app.get("/api/jira-suggest/previews")
-def jira_suggest_previews():
+def jira_suggest_previews(user: dict = Depends(require_login)):
     """The current per-ticket suggestions (would-post in dry-run / posted in live),
     so the UI can show them instead of grepping the log."""
     import jirabot
@@ -759,7 +914,7 @@ def jira_suggest_previews():
 
 
 @app.post("/api/jira-suggest/config")
-def jira_suggest_config(body: dict):
+def jira_suggest_config(body: dict, admin: dict = Depends(require_admin)):
     """Persist the auto-suggest settings (config.json). Takes effect within ~1 min
     (the poller re-reads config live). Mirrors the LLM-toggle endpoints."""
     import jirabot
@@ -789,7 +944,7 @@ def jira_suggest_config(body: dict):
 
 
 @app.post("/api/jira-suggest/run")
-def jira_suggest_run():
+def jira_suggest_run(admin: dict = Depends(require_admin)):
     """Trigger one auto-suggest pass on demand (background) instead of waiting for
     the timer. Honors the dry-run flag exactly like a scheduled run."""
     import jirabot
@@ -813,7 +968,7 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx", ".xls"}
 
 
 @app.post("/api/documents")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), admin: dict = Depends(require_admin)):
     import ingest as ing
     ext = Path(file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -830,14 +985,14 @@ async def upload_document(file: UploadFile = File(...)):
 
 
 @app.get("/api/documents")
-def list_documents():
+def list_documents(user: dict = Depends(require_login)):
     import ingest as ing
     cfg = load_config()
     return {"ok": True, "documents": ing.list_documents(cfg)}
 
 
 @app.delete("/api/documents/{doc_id}")
-def delete_document(doc_id: str):
+def delete_document(doc_id: str, admin: dict = Depends(require_admin)):
     import ingest as ing
     cfg = load_config()
     return ing.delete_document(doc_id, cfg)
@@ -860,7 +1015,7 @@ PROVIDER_MODELS = {
 
 
 @app.get("/api/llm/providers")
-def llm_providers():
+def llm_providers(user: dict = Depends(require_login)):
     import generate as g
     cfg = load_config()
     return {
@@ -882,7 +1037,7 @@ def llm_providers():
 
 
 @app.post("/api/llm/enabled")
-def llm_set_enabled(body: dict):
+def llm_set_enabled(body: dict, admin: dict = Depends(require_admin)):
     """Master switch for ALL LLM use (synthesis, re-rank, parse). When off, the
     tool does pure retrieval and shows matched comments verbatim — no LLM calls,
     cloud or local. Persisted to config.json."""
@@ -893,7 +1048,7 @@ def llm_set_enabled(body: dict):
 
 
 @app.post("/api/llm/rerank")
-def llm_set_rerank(body: dict):
+def llm_set_rerank(body: dict, admin: dict = Depends(require_admin)):
     """Toggle LLM relevance re-ranking on/off (persisted to config.json)."""
     cfg = load_config()
     cfg["workaround_finder"]["llm_rerank"] = bool(body.get("enabled", False))
@@ -902,7 +1057,7 @@ def llm_set_rerank(body: dict):
 
 
 @app.post("/api/llm/synthesize")
-def llm_set_synthesize(body: dict):
+def llm_set_synthesize(body: dict, admin: dict = Depends(require_admin)):
     """Toggle LLM workaround synthesis on/off (persisted to config.json). When
     off, a strong match is shown verbatim instead of being rewritten into the
     `=== FIX ===` format."""
@@ -913,7 +1068,7 @@ def llm_set_synthesize(body: dict):
 
 
 @app.get("/api/llm/config")
-def llm_config_get():
+def llm_config_get(admin: dict = Depends(require_admin)):
     cfg = load_config()
     return {
         "ok":       True,
@@ -924,7 +1079,7 @@ def llm_config_get():
 
 
 @app.post("/api/llm/config")
-def llm_config_set(body: dict):
+def llm_config_set(body: dict, admin: dict = Depends(require_admin)):
     provider = body.get("provider", "local")
     model    = body.get("model", "")
     api_key  = body.get("api_key", "").strip()
@@ -952,7 +1107,7 @@ def llm_config_set(body: dict):
 
 
 @app.get("/api/llm/keys")
-def llm_keys_get(provider: str):
+def llm_keys_get(provider: str, admin: dict = Depends(require_admin)):
     """Masked list of keys configured for a provider (fingerprint + last 4 chars).
     Never returns the secret itself."""
     if provider not in PROVIDERS:
@@ -961,7 +1116,7 @@ def llm_keys_get(provider: str):
 
 
 @app.post("/api/llm/keys")
-def llm_keys_mutate(body: dict):
+def llm_keys_mutate(body: dict, admin: dict = Depends(require_admin)):
     """Add or remove one key in a provider's rotation list (stored comma-separated
     in .env). Returns the updated masked list. body: {provider, action, api_key|fp}."""
     provider = body.get("provider", "")
@@ -984,14 +1139,14 @@ def llm_keys_mutate(body: dict):
 
 
 @app.post("/api/llm/test")
-def llm_test():
+def llm_test(admin: dict = Depends(require_admin)):
     import generate as g
     cfg = load_config()
     return g.test_provider(cfg["llm"])
 
 
 @app.get("/api/llm/status")
-def llm_status():
+def llm_status(user: dict = Depends(require_login)):
     """Lightweight connection status for the active provider (UI indicator)."""
     import generate as g
     cfg = load_config()
@@ -999,7 +1154,7 @@ def llm_status():
 
 
 @app.get("/api/llm/quota")
-def llm_quota():
+def llm_quota(user: dict = Depends(require_login)):
     """Latest Groq rate-limit snapshot (captured from real call headers — costs
     nothing). Empty until the first Groq call of the session."""
     import generate as g
@@ -1069,7 +1224,7 @@ def _write_env(key: str, value: str):
 # ── Config ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/config")
-def config_get():
+def config_get(admin: dict = Depends(require_admin)):
     cfg = load_config()
     wf  = cfg["workaround_finder"]
     return {
@@ -1091,7 +1246,7 @@ def config_get():
 
 
 @app.post("/api/config")
-def config_set(body: dict):
+def config_set(body: dict, admin: dict = Depends(require_admin)):
     cfg = load_config()
     if "jql" in body:
         cfg["workaround_finder"]["ingest_jql"] = body["jql"]

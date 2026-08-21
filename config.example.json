@@ -44,6 +44,10 @@
     "ollama_url": "http://localhost:11434"
   },
   "embed": {
-    "model": "all-MiniLM-L6-v2"
+    "model": "text-embedding-ada-002"
+  },
+  "auth": {
+    "admin_emails": ["you@example.com"],
+    "users_path": "trackers/users.json"
   }
 }

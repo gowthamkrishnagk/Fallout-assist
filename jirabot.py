@@ -375,6 +375,24 @@ def _compose_comment(cfg: dict, key: str, cand: str, pct: int, answer: str,
     )
 
 
+def _compose_rule_comment(cfg: dict, key: str, res: dict) -> str:
+    """The comment for a DETERMINISTIC rule match — distinct from _compose_comment on
+    purpose: there's no % confidence, no "matched ticket", and no 👍/👎 links (a vote
+    there would feed the similarity-ranking signal, which doesn't apply to a rule this
+    is not searched or scored)."""
+    rule_id      = res.get("rule_id", "")
+    approved_by  = res.get("rule_approved_by", "") or "an admin"
+    return (
+        f"*✅ Approved workaround* — rule `{rule_id}` (reviewed by {approved_by})\n\n"
+        f"{res.get('answer', '')}\n\n"
+        "⚠️ This is an approved, reviewed fix for this exact error text — not a "
+        "similarity guess. Still confirm the specific MSISDN/order on THIS ticket "
+        "before running any destructive step (like network cleanup).\n\n"
+        f"{_format_line(cfg, key, '')}"
+        f"\n_🤖 Auto-suggested by FalloutAssist · {MARKER}_"
+    )
+
+
 def _compose_manual_review(cfg: dict, key: str) -> str:
     return (
         "*💡 Suggested workaround*\n\n"
@@ -521,6 +539,8 @@ def _cand_of(top: dict) -> tuple[str, str]:
     """(identity, kind) for the candidate that produced the answer."""
     if top.get("type") == "doc":
         return top.get("filename", ""), "doc"
+    if top.get("type") == "rule":
+        return top.get("key", ""), "rule"
     return top.get("key", ""), "ticket"
 
 
@@ -843,10 +863,11 @@ def run_once(cfg: dict) -> dict:
             # chatter or a bare "done"); or the LLM-free guard caught an answer that is an
             # error description rather than a fix.
             matched = bool(
-                res.get("mode") == "strong_match" and res.get("top")
-                and res.get("best_score", 0) >= threshold
-                and not res.get("declined")
-                and not looks_like_nonfix(res.get("answer", ""))
+                res.get("mode") == "approved_rule"   # authored + reviewed — always trusted
+                or (res.get("mode") == "strong_match" and res.get("top")
+                    and res.get("best_score", 0) >= threshold
+                    and not res.get("declined")
+                    and not looks_like_nonfix(res.get("answer", "")))
             )
             if not matched:
                 why = ("no reliable workaround in sources" if res.get("declined")
@@ -894,8 +915,10 @@ def run_once(cfg: dict) -> dict:
             cand, kind = _cand_of(top)
             pct        = round(res.get("best_score", 0) * 100)
             template   = res.get("resolution_template") or ""
-            # The matched-ticket links and the running vote count shown in the comment.
-            srcs, tally = _comment_extras(cfg, res, cand, kind)
+            is_rule    = res.get("mode") == "approved_rule"
+            # The matched-ticket links and running vote count don't apply to a rule —
+            # nothing was searched or scored, there's nothing to link provenance to.
+            srcs, tally = ([], {}) if is_rule else _comment_extras(cfg, res, cand, kind)
             # Set when this ticket already carries our comment — it is then edited in
             # place rather than added, so an upgrade never reads as spam.
             upgrading  = bool((st or {}).get("comment_id"))
@@ -914,18 +937,20 @@ def run_once(cfg: dict) -> dict:
                           "summary": (getattr(issue.fields, "summary", "") or "")[:140],
                           "rejected": [], "updated": _now()}
 
+            label = f"approved rule {cand}" if is_rule else f"matched {cand} {pct}%"
+
             if dry:
                 verb = "would upgrade" if upgrading else "would comment"
                 print(f"[JIRA-SUGGEST] (dry-run) {verb} on {key}: "
-                      f"matched {cand} {pct}% — {res['answer'][:80]!r}")
+                      f"{label} — {res['answer'][:80]!r}")
                 state[key] = {**base_rec, "status": "dry_run"}
                 would += 1
                 continue
 
             try:
-                fix_id  = _put_comment(jira, key, (st or {}).get("comment_id", ""),
-                                       _compose_comment(cfg, key, cand, pct, res["answer"],
-                                                        srcs, tally))
+                comment_body = (_compose_rule_comment(cfg, key, res) if is_rule else
+                                _compose_comment(cfg, key, cand, pct, res["answer"], srcs, tally))
+                fix_id  = _put_comment(jira, key, (st or {}).get("comment_id", ""), comment_body)
                 state[key] = {**base_rec, "comment_id": fix_id, "status": "posted",
                               # Carried forward, never dropped: a ticket commented on
                               # BEFORE this change still owns a format-reminder comment,
@@ -935,7 +960,7 @@ def run_once(cfg: dict) -> dict:
                                  if (st or {}).get("template_comment_id") else {})}
                 posted += 1
                 print(f"[JIRA-SUGGEST] {'upgraded' if upgrading else 'commented on'} "
-                      f"{key} (matched {cand} {pct}%)")
+                      f"{key} ({label})")
             except Exception as e:
                 print(f"[JIRA-SUGGEST] FAILED to comment on {key}: {str(e)[:140]}")
 

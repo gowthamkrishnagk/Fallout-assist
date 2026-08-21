@@ -8,15 +8,51 @@
 </head>
 <body>
 
+<!-- ── Auth gate: shown until /api/auth/me resolves a signed-in user ────────── -->
+<div id="auth-gate" class="hidden">
+  <div class="auth-card">
+    <div class="auth-logo">⚡ FalloutAssist</div>
+    <div class="auth-sub" id="auth-sub">Sign in to search, submit and review workarounds.</div>
+
+    <div id="auth-login-form">
+      <label class="field-label">Email</label>
+      <input id="login-email" class="input-text" style="width:100%" type="email" autocomplete="username">
+      <label class="field-label">Password</label>
+      <input id="login-password" class="input-text" style="width:100%" type="password" autocomplete="current-password">
+      <div class="auth-actions">
+        <button class="btn-primary" style="flex:1" onclick="doLogin()">Sign in</button>
+        <span id="auth-login-spinner" class="spinner hidden"></span>
+      </div>
+      <div class="auth-switch">No account yet? <a onclick="showAuthForm('register')">Register</a></div>
+    </div>
+
+    <div id="auth-register-form" class="hidden">
+      <label class="field-label">Email</label>
+      <input id="register-email" class="input-text" style="width:100%" type="email" autocomplete="username">
+      <label class="field-label">Password</label>
+      <input id="register-password" class="input-text" style="width:100%" type="password"
+             autocomplete="new-password" placeholder="At least 8 characters">
+      <div class="auth-actions">
+        <button class="btn-primary" style="flex:1" onclick="doRegister()">Create account</button>
+        <span id="auth-register-spinner" class="spinner hidden"></span>
+      </div>
+      <div class="auth-switch">Already have an account? <a onclick="showAuthForm('login')">Sign in</a></div>
+    </div>
+
+    <div id="auth-error" class="auth-error hidden"></div>
+  </div>
+</div>
+
 <div class="sidebar">
   <div class="logo">⚡ FalloutAssist</div>
 
   <nav>
     <button class="nav-btn active" onclick="showTab('ask')">💬 Ask</button>
-    <button class="nav-btn" onclick="showTab('ingest')">⚙️ Ingest Jira</button>
+    <button class="nav-btn" onclick="showTab('rules')">📐 Rules</button>
+    <button class="nav-btn admin-only hidden" onclick="showTab('ingest')">⚙️ Ingest Jira</button>
     <button class="nav-btn" onclick="showTab('docs')">📄 Documents</button>
-    <button class="nav-btn" onclick="showTab('llm')">🤖 LLM Settings</button>
-    <button class="nav-btn" onclick="showTab('settings')">🔧 Config</button>
+    <button class="nav-btn admin-only hidden" onclick="showTab('llm')">🤖 LLM Settings</button>
+    <button class="nav-btn admin-only hidden" onclick="showTab('settings')">🔧 Config</button>
   </nav>
 
   <div class="sidebar-status">
@@ -26,6 +62,14 @@
     </div>
     <div id="kb-status">Knowledge base: loading...</div>
     <div id="run-status"></div>
+
+    <div class="user-badge">
+      <div class="who">
+        <div class="email" id="user-email">—</div>
+        <div class="role" id="user-role"></div>
+      </div>
+      <button class="logout-btn" onclick="doLogout()">Sign out</button>
+    </div>
   </div>
 </div>
 
@@ -217,12 +261,70 @@
     </div>
   </div>
 
+  <!-- ── RULES TAB ───────────────────────────────────────────── -->
+  <div id="tab-rules" class="tab hidden">
+    <h2>Workaround Rules</h2>
+    <p class="subtitle">Deterministic, exact-match fixes for a specific error signature —
+      unlike a similarity match, an approved rule answers the same way every time this
+      exact error recurs. Anyone can propose one; an admin has to approve it (and any
+      rule that would conflict with an already-approved one is refused) before it takes
+      effect.</p>
+
+    <div class="config-section">
+      <h3>Propose a rule</h3>
+
+      <label class="field-label">Error Description pattern <span class="muted" style="font-weight:400;text-transform:none">— a regex; this is the ONLY required field, and it gates the match</span></label>
+      <p class="subtitle" style="margin:0 0 8px">
+        Matched against the <b>cleaned</b> error text — the same normalization ingest/search
+        already use before embedding (hyphens become spaces, timestamps/record-IDs are
+        stripped, etc.), not the raw ticket string. Paste a real sample below and hit
+        <b>Test pattern</b> to see the cleaned form your regex actually runs against.
+      </p>
+      <textarea id="rule-pattern" class="input-text" rows="3" style="width:100%;font-family:ui-monospace,monospace"
+                placeholder="e.g. ^2 MSISDN already defined External error\. MSISDN ALREADY DEFINED \[Processed by PG Node: prmiedapg01 \d+\] in task CreateHLRSubscription: MSISDN already activated in Network\.$"></textarea>
+
+      <div class="test-row" style="display:flex;gap:10px;margin-top:10px">
+        <input id="rule-pattern-test" class="input-text" style="flex:1;font-family:ui-monospace,monospace;font-size:12.5px"
+               placeholder="Paste a real (raw) error string — it'll be cleaned before testing, same as at runtime">
+        <button class="btn-secondary" onclick="testRulePattern()">Test pattern</button>
+      </div>
+      <div id="rule-pattern-result" class="test-result hidden"></div>
+
+      <label class="field-label" style="margin-top:16px">Order Type <span class="muted" style="font-weight:400;text-transform:none">— optional, blank = any</span></label>
+      <input id="rule-order-type" class="input-text" style="width:100%" placeholder="e.g. Sales">
+
+      <label class="field-label" style="margin-top:16px">Order Reason <span class="muted" style="font-weight:400;text-transform:none">— optional, comma-separated, blank = any</span></label>
+      <input id="rule-order-reason" class="input-text" style="width:100%" placeholder="e.g. New, Existing">
+
+      <label class="field-label" style="margin-top:16px">Failed Step <span class="muted" style="font-weight:400;text-transform:none">— optional, comma-separated, blank = any</span></label>
+      <input id="rule-failed-step" class="input-text" style="width:100%" placeholder="e.g. Nokia Create(Block) Line DESIM">
+
+      <label class="field-label" style="margin-top:16px">Approved workaround</label>
+      <textarea id="rule-workaround" class="input-text" rows="6" style="width:100%"
+                placeholder="1. Do this...&#10;2. Then this..."></textarea>
+
+      <div class="ingest-actions">
+        <button class="btn-primary" onclick="submitRule()">Propose rule</button>
+        <span id="rule-submit-spinner" class="spinner hidden"></span>
+      </div>
+      <div id="rule-submit-error" class="auth-error hidden"></div>
+    </div>
+
+    <div class="config-section">
+      <h3>All rules <span id="rules-count" class="muted" style="font-weight:400"></span></h3>
+      <div class="ingest-actions" style="margin-bottom:12px">
+        <button class="btn-secondary" onclick="loadRules()">↻ Refresh</button>
+      </div>
+      <div id="rules-list"></div>
+    </div>
+  </div>
+
   <!-- ── DOCS TAB ────────────────────────────────────────────── -->
   <div id="tab-docs" class="tab hidden">
     <h2>Documents</h2>
     <p class="subtitle">Upload PDF, Word, Excel, or text files. They are chunked, embedded, and searched alongside Jira tickets. Re-uploading the same filename replaces the old version automatically.</p>
 
-    <div class="upload-area" id="drop-zone"
+    <div class="upload-area admin-only" id="drop-zone"
          ondragover="event.preventDefault()" ondrop="handleDrop(event)">
       <div class="upload-icon">📂</div>
       <div class="upload-drag-text">Drag &amp; drop files here</div>
@@ -429,6 +531,7 @@ function showTab(name) {
   if (name === 'docs')    loadDocs();
   if (name === 'llm')   { loadLLMProviders(); loadLLMQuota(); }
   if (name === 'settings') loadConfig();
+  if (name === 'rules')   loadRules();
 }
 
 // ── ASK ──────────────────────────────────────────────────────────────────────
@@ -495,6 +598,7 @@ async function doAsk() {
 
   // Mode badge
   const modeBadge = {
+    approved_rule:  '📐 Approved rule — reviewed fix, not a similarity guess',
     strong_match:   '✅ Strong match (≥' + Math.round((r.threshold||0.8)*100) + '%)',
     low_confidence: '⚠️ Low confidence (best: ' + Math.round((r.best_score||0)*100) + '%)',
     no_data:        '❌ No data',
@@ -860,6 +964,150 @@ async function reviewSuggestion(sid, action, btn) {
   }
 }
 
+// ── Deterministic workaround rules ───────────────────────────────────────────
+async function testRulePattern() {
+  const pattern = document.getElementById('rule-pattern').value;
+  const sample  = document.getElementById('rule-pattern-test').value;
+  const box     = document.getElementById('rule-pattern-result');
+  box.classList.remove('ok', 'fail', 'hidden');
+
+  // Match at runtime happens against the CLEANED error text (same normalization
+  // ingest/search use before embedding — hyphens become spaces, timestamps/record-IDs
+  // are stripped, etc.), never the raw pasted string. Ask the server for the real
+  // cleaned form rather than approximating it in JS, so the tester can't disagree with
+  // what match_query actually does.
+  let cleaned = sample;
+  try {
+    const r = await post('/api/rules/clean-preview', { text: sample });
+    if (r && r.ok) cleaned = r.cleaned;
+  } catch (e) { /* fall back to testing the raw sample */ }
+
+  try {
+    const re = new RegExp(pattern, 'is');
+    if (re.test(cleaned)) {
+      box.classList.add('ok');
+      box.textContent = '✓ Matches the cleaned form: "' + cleaned + '"';
+    } else {
+      box.classList.add('fail');
+      box.textContent = '✗ No match against the cleaned form: "' + cleaned + '" — this rule would fall through to search instead.';
+    }
+  } catch (e) {
+    box.classList.add('fail');
+    box.textContent = '✗ Invalid regex: ' + e.message;
+  }
+}
+
+function _csv(id) {
+  return document.getElementById(id).value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function submitRule() {
+  const pattern = document.getElementById('rule-pattern').value.trim();
+  const wa      = document.getElementById('rule-workaround').value.trim();
+  const errBox  = document.getElementById('rule-submit-error');
+  errBox.classList.add('hidden');
+  if (!pattern || !wa) {
+    errBox.textContent = 'Error Description pattern and the workaround text are both required.';
+    errBox.classList.remove('hidden');
+    return;
+  }
+  const orderType   = document.getElementById('rule-order-type').value.trim();
+  const orderReason = _csv('rule-order-reason');
+  const failedStep  = _csv('rule-failed-step');
+  const match = { error_description: { op: 'matches_pattern', pattern } };
+  if (orderType)          match.order_type   = { op: 'equals', value: orderType };
+  if (orderReason.length) match.order_reason = { op: 'in', values: orderReason };
+  if (failedStep.length)  match.failed_step  = { op: 'in', values: failedStep };
+
+  setLoading('rule-submit', true);
+  try {
+    const r = await post('/api/rules', { match, workaround_text: wa });
+    if (!r.ok) { errBox.textContent = r.detail || 'Could not create rule'; errBox.classList.remove('hidden'); return; }
+    document.getElementById('rule-pattern').value = '';
+    document.getElementById('rule-pattern-test').value = '';
+    document.getElementById('rule-order-type').value = '';
+    document.getElementById('rule-order-reason').value = '';
+    document.getElementById('rule-failed-step').value = '';
+    document.getElementById('rule-workaround').value = '';
+    loadRules();
+  } finally {
+    setLoading('rule-submit', false);
+  }
+}
+
+function _ruleScopeLine(m) {
+  const parts = [];
+  parts.push(m.order_type ? `Order Type = ${m.order_type.value}` : 'any Order Type');
+  parts.push(m.order_reason ? `Order Reason ∈ {${(m.order_reason.values||[]).join(', ')}}` : 'any Order Reason');
+  parts.push(m.failed_step ? `Failed Step ∈ {${(m.failed_step.values||[]).join(', ')}}` : 'any Failed Step');
+  return parts.join(' · ');
+}
+
+async function loadRules() {
+  const el = document.getElementById('rules-list');
+  if (!el) return;
+  let r;
+  try { r = await get('/api/rules'); } catch (e) { el.innerHTML = ''; return; }
+  const items = (r && r.rules) || [];
+  const cnt = document.getElementById('rules-count');
+  if (cnt) cnt.textContent = items.length ? `· ${items.length}` : '';
+  if (!items.length) {
+    el.innerHTML = '<div class="muted" style="font-size:13px">No rules yet.</div>';
+    return;
+  }
+  const statusTag = { approved: 'fb-tag-up', draft: '', deprecated: 'fb-tag-down' };
+  el.innerHTML = items.map(rule => {
+    const m = rule.match || {};
+    const pattern = escHtml((m.error_description || {}).pattern || '');
+    const actions = IS_ADMIN && rule.status !== 'deprecated' ? `
+      <div class="ingest-actions" style="margin-top:10px">
+        ${rule.status === 'draft' ? `<button class="btn-primary" onclick="approveRule('${rule.id}',this)">✓ Approve</button>` : ''}
+        <button class="btn-secondary" onclick="deprecateRule('${rule.id}',this)">Deprecate</button>
+      </div>` : '';
+    return `
+    <div class="source-item" id="rule-${rule.id}">
+      <div class="source-header">
+        <span class="fb-tag ${statusTag[rule.status] || ''}">${escHtml(rule.status)}</span>
+        <span class="muted">by ${escHtml(rule.created_by || 'unknown')}${rule.approved_by ? ' · approved by ' + escHtml(rule.approved_by) : ''}</span>
+      </div>
+      <div class="source-desc" style="margin-top:8px">
+        <div class="desc-row"><span class="desc-label">Pattern</span><span style="font-family:ui-monospace,monospace;font-size:12px">${pattern}</span></div>
+        <div class="desc-row"><span class="desc-label">Scope</span><span>${escHtml(_ruleScopeLine(m))}</span></div>
+      </div>
+      <div class="source-comment">${escHtml(rule.workaround_text)}</div>
+      <div id="rule-conflict-${rule.id}" class="auth-error hidden" style="margin-top:8px"></div>
+      ${actions}
+    </div>`;
+  }).join('');
+}
+
+async function approveRule(id, btn) {
+  if (btn) btn.disabled = true;
+  const box = document.getElementById('rule-conflict-' + id);
+  box.classList.add('hidden');
+  const r = await post(`/api/rules/${id}/approve`, {});
+  if (r && r.ok) {
+    loadRules();
+    return;
+  }
+  if (btn) btn.disabled = false;
+  const detail = r && r.detail;
+  if (detail && detail.conflicts) {
+    box.textContent = '⚠️ ' + detail.message + ' — conflicts with: ' +
+      detail.conflicts.map(c => c.id.slice(0, 8)).join(', ');
+  } else {
+    box.textContent = '⚠️ ' + ((detail && detail.message) || detail || 'could not approve');
+  }
+  box.classList.remove('hidden');
+}
+
+async function deprecateRule(id, btn) {
+  if (btn) btn.disabled = true;
+  const r = await post(`/api/rules/${id}/deprecate`, {});
+  if (r && r.ok) { loadRules(); }
+  else { if (btn) btn.disabled = false; alert('Could not deprecate: ' + ((r && (r.detail || r.error)) || 'unknown error')); }
+}
+
 function renderJiraSuggestStatus(r) {
   const badge = document.getElementById('js-mode-badge');
   badge.textContent      = r.dry_run ? 'DRY-RUN' : 'LIVE';
@@ -1009,7 +1257,7 @@ function renderDocs(docs) {
         <div class="doc-name">${icon} ${safeName}</div>
         <div class="doc-meta">${d.chunks} chunk${d.chunks !== 1 ? 's' : ''} &nbsp;·&nbsp; Indexed ${date}</div>
       </div>
-      <button class="btn-danger-sm" onclick="deleteDoc('${safeId}', '${safeName.replace(/'/g,"\\'")}')">🗑 Remove</button>
+      ${IS_ADMIN ? `<button class="btn-danger-sm" onclick="deleteDoc('${safeId}', '${safeName.replace(/'/g,"\\'")}')">🗑 Remove</button>` : ''}
     </div>`;
   }).join('');
 }
@@ -1326,8 +1574,16 @@ function toggleDesc(uid, btn) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-async function get(url)       { return fetch(url).then(x => x.json()); }
-async function post(url, body){ return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json()); }
+async function get(url) {
+  const res = await fetch(url);
+  if (res.status === 401) { showAuthGate('Your session expired — sign in again to continue.'); return {}; }
+  return res.json();
+}
+async function post(url, body) {
+  const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (res.status === 401) { showAuthGate('Your session expired — sign in again to continue.'); return {}; }
+  return res.json();
+}
 function showEl(id)  { document.getElementById(id).classList.remove('hidden'); }
 function hideEl(id)  { document.getElementById(id).classList.add('hidden'); }
 function setLoading(scope, on) {
@@ -1338,15 +1594,108 @@ function setLoading(scope, on) {
 function showError(id, msg) { const el=document.getElementById(id); el.textContent=msg; showEl(id); }
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
-window.onload = () => {
-  loadIngestStatus();
-  loadIngestJQL();
-  loadSchedule();
+// ── Auth: register / login / logout / who-am-i ───────────────────────────────
+let CURRENT_USER = null;
+let IS_ADMIN     = false;
+
+function showAuthForm(which) {
+  document.getElementById('auth-login-form').classList.toggle('hidden', which !== 'login');
+  document.getElementById('auth-register-form').classList.toggle('hidden', which !== 'register');
+  document.getElementById('auth-error').classList.add('hidden');
+}
+
+function showAuthGate(message) {
+  if (message) { document.getElementById('auth-sub').textContent = message; }
+  document.getElementById('auth-gate').classList.remove('hidden');
+}
+
+function hideAuthGate() {
+  document.getElementById('auth-gate').classList.add('hidden');
+}
+
+function applyRole(user) {
+  CURRENT_USER = user;
+  IS_ADMIN     = user.role === 'admin';
+  document.getElementById('user-email').textContent = user.email;
+  const roleEl = document.getElementById('user-role');
+  roleEl.textContent = user.role;
+  roleEl.classList.toggle('admin', IS_ADMIN);
+  document.querySelectorAll('.admin-only').forEach(el => el.classList.toggle('hidden', !IS_ADMIN));
+  // If an admin-only tab was left active from a previous (admin) session, fall back
+  // to Ask — a non-admin should never land on a tab whose data they can't fetch.
+  if (!IS_ADMIN) {
+    const activeAdminTab = document.querySelector('.tab.active.admin-only, #tab-ingest.active, #tab-llm.active, #tab-settings.active');
+    if (activeAdminTab) { document.querySelector('.nav-btn').click(); }
+  }
+}
+
+async function checkAuth() {
+  const r = await get('/api/auth/me');
+  if (r && r.user) {
+    hideAuthGate();
+    applyRole(r.user);
+    afterAuthInit();
+  } else {
+    showAuthGate();
+  }
+}
+
+async function doLogin() {
+  const email    = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  setLoading('auth-login', true);
+  try {
+    const r = await fetch('/api/auth/login', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, password})}).then(x => x.json());
+    if (!r.ok) { showError('auth-error', r.detail || 'sign in failed'); return; }
+    hideAuthGate();
+    applyRole(r.user);
+    afterAuthInit();
+  } finally {
+    setLoading('auth-login', false);
+  }
+}
+
+async function doRegister() {
+  const email    = document.getElementById('register-email').value.trim();
+  const password = document.getElementById('register-password').value;
+  setLoading('auth-register', true);
+  try {
+    const r = await fetch('/api/auth/register', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, password})}).then(x => x.json());
+    if (!r.ok) { showError('auth-error', r.detail || 'registration failed'); return; }
+    hideAuthGate();
+    applyRole(r.user);
+    afterAuthInit();
+  } finally {
+    setLoading('auth-register', false);
+  }
+}
+
+async function doLogout() {
+  await post('/api/auth/logout', {});
+  CURRENT_USER = null;
+  IS_ADMIN     = false;
+  showAuthGate('Signed out. Sign in to continue.');
+}
+
+// Runs once, right after a session is confirmed (fresh sign-in, or already signed
+// in on page load) — everything below assumed an anonymous visitor before this.
+let _afterAuthRan = false;
+function afterAuthInit() {
+  if (_afterAuthRan) return;
+  _afterAuthRan = true;
   loadLLMStatus();
-};
-setInterval(loadIngestStatus, 5000);
-setInterval(loadLLMStatus, 30000);   // slower poll — avoids spamming cloud APIs
+  loadIngestStatus();
+  if (IS_ADMIN) { loadIngestJQL(); loadSchedule(); }
+  setInterval(loadIngestStatus, 5000);
+  setInterval(loadLLMStatus, 30000);   // slower poll — avoids spamming cloud APIs
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.onload = () => { checkAuth(); };
 </script>
 </body>
 </html>

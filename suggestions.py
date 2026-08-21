@@ -63,13 +63,15 @@ def _all(cfg: dict) -> list:
 
 def add(step: str, error: str, source_key: str, disliked_key: str,
         suggestion: str, cfg: dict, origin: str = "jira_field",
-        raw: str = "", synth: dict | None = None) -> dict:
+        raw: str = "", synth: dict | None = None, submitted_by: str = "") -> dict:
     """Append one pending suggestion. Returns the stored record.
 
     `suggestion` is the body that gets INDEXED on approval (ingest.ingest_suggestion
     reads this field). `raw` keeps the agent's own words when the text was rewritten, so
     a reviewer can always see what was actually submitted rather than only the model's
-    reading of it. `synth` carries the synthesis outcome for the review panel."""
+    reading of it. `synth` carries the synthesis outcome for the review panel.
+    `submitted_by` is the signed-in user's email (the app_dislike path always has one now
+    that submitting requires login; '' for the jira_field path, which has no app session)."""
     rec = {
         "id":           uuid.uuid4().hex,
         "ts":           datetime.utcnow().isoformat(),
@@ -83,6 +85,8 @@ def add(step: str, error: str, source_key: str, disliked_key: str,
         # '' when the text was not rewritten (the Jira-field path indexes verbatim).
         "raw":          (raw or "").strip(),
         "synth":        synth or {},
+        "submitted_by": (submitted_by or "").strip(),
+        "approved_by":  "",
         "indexed_id":   "",
     }
     path = _path(cfg)
@@ -201,9 +205,10 @@ def get(sid: str, cfg: dict) -> dict | None:
     return next((r for r in _all(cfg) if r.get("id") == sid), None)
 
 
-def set_status(sid: str, status: str, cfg: dict, indexed_id: str = "") -> dict | None:
-    """Flip a suggestion's status (and stamp the indexed chunk id on approval).
-    Returns the updated record, or None if the id isn't found."""
+def set_status(sid: str, status: str, cfg: dict, indexed_id: str = "",
+               approved_by: str = "") -> dict | None:
+    """Flip a suggestion's status (and stamp the indexed chunk id + approving admin's
+    email on approval). Returns the updated record, or None if the id isn't found."""
     if status not in STATUSES:
         raise ValueError(f"status must be one of {STATUSES}, got {status!r}")
     path    = _path(cfg)
@@ -216,6 +221,8 @@ def set_status(sid: str, status: str, cfg: dict, indexed_id: str = "") -> dict |
                 r["updated_ts"] = datetime.utcnow().isoformat()
                 if indexed_id:
                     r["indexed_id"] = indexed_id
+                if approved_by:
+                    r["approved_by"] = approved_by
                 updated = r
                 break
         if updated is not None:

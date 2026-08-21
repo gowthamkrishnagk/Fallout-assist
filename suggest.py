@@ -50,6 +50,33 @@ def suggest_for_query(query_text: str, cfg: dict, exclude_keys=frozenset()) -> d
     import generate as g
     import ingest as ing
     import watable as wt
+    import rules as rl
+
+    # ── Deterministic rules FIRST, before any similarity search ────────────────
+    # A rule's error_description either matches this failure exactly or it doesn't —
+    # no score, no "nearest neighbour" to second-guess. Only an approved rule can
+    # answer here; nothing about this path touches the vector index.
+    step, error   = s.parse_input(query_text, cfg)
+    order_type    = s._grab_field(query_text, "Order Type")
+    order_reason  = s._grab_field(query_text, "Order Reason")
+    rule = rl.match_query(step=step, error=error, order_type=order_type,
+                          order_reason=order_reason, cfg=cfg)
+    if rule:
+        answer   = rule["workaround_text"]
+        template = wt.from_raw(query_text, answer, None)
+        top      = {"type": "rule", "key": f"RULE:{rule['id']}", "rule_id": rule["id"],
+                    "score": 1.0, "comment": answer, "summary": "Approved workaround rule",
+                    "url": "", "approved_by": rule.get("approved_by", "")}
+        return {
+            "ok": True, "mode": "approved_rule", "answer": answer,
+            "resolution_template": template,
+            "provider": "approved_rule", "model": "", "llm_note": "",
+            "threshold": cfg["workaround_finder"].get("score_threshold", 0.7),
+            "best_score": 1.0, "strong": [], "context": [],
+            "query_step": step, "query_error": error,
+            "declined": False, "top": top,
+            "rule_id": rule["id"], "rule_approved_by": rule.get("approved_by", ""),
+        }
 
     result     = s.find_workarounds(query_text, cfg, exclude_keys=exclude_keys)
     strong     = result["strong"]

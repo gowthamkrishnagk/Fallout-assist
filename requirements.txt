@@ -3,11 +3,12 @@ uvicorn[standard]==0.32.1
 python-dotenv==1.0.1
 httpx==0.28.1
 jira==3.8.0
-chromadb==0.5.23
-sentence-transformers==3.3.1
+chromadb==0.5.4
 rank-bm25==0.2.2
 pypdf==5.1.0
 python-docx==1.1.2
 openpyxl==3.1.5
 python-multipart==0.0.12
 truststore==0.10.1
+bcrypt==4.2.1
+itsdangerous==2.2.0

@@ -483,9 +483,49 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                 for issue, _ in changed:
                     vectordb.delete_ticket_by_source(issue.key, index_path)
 
+            # Embedded + stored in BATCHES rather than all at once at the end — a full
+            # ingest can be 10,000+ tickets, and holding every chunk's text AND both its
+            # embedding vectors in memory simultaneously (plus every fetched Jira Issue
+            # object) is what made memory climb into the GBs on a full-scope run. This
+            # caps peak memory to roughly one batch's worth, at the cost of a few more
+            # (already-batched, already-paced — see embedder.py) embedding calls.
+            _STORE_BATCH = 300   # chunks per embed+store cycle, not tickets — a ticket
+                                  # with several resolution comments contributes several
+
             ids = []; step_texts = []; error_texts = []; display_texts = []; metas = []
             skipped = 0
             reindexed = 0
+            total_indexed = 0
+            collections_reset = False   # full=True resets ONCE, before the first write —
+                                        # never mid-run, so a later batch can't wipe an
+                                        # earlier one's just-written chunks
+
+            def _flush_batch():
+                nonlocal ids, step_texts, error_texts, display_texts, metas
+                nonlocal total_indexed, collections_reset
+                if not ids:
+                    return
+                if progress_cb:
+                    progress_cb(f"Embedding {len(ids)} chunks "
+                               f"({total_indexed + len(ids)} so far)...")
+                step_embs  = embedder.embed(step_texts, embed_model)
+                error_texts_clean = [t if t else "" for t in error_texts]
+                error_embs_all    = embedder.embed(error_texts_clean, embed_model)
+                error_embs = [emb if error_texts[k] else None
+                             for k, emb in enumerate(error_embs_all)]
+                if progress_cb:
+                    progress_cb("Storing chunks...")
+                # Full rebuild: wipe + recreate the collections HERE, before the FIRST
+                # batch write only — once new chunks exist in the fresh collections, a
+                # later batch must never wipe them again. Same reasoning as before for
+                # why this isn't done up front: a failure before any batch completes
+                # never leaves the index empty.
+                if full and not collections_reset:
+                    vectordb.reset_ticket_collections(index_path)
+                    collections_reset = True
+                vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
+                total_indexed += len(ids)
+                ids, step_texts, error_texts, display_texts, metas = [], [], [], [], []
 
             for i, (issue, updated) in enumerate(changed):
                 assignee      = getattr(issue.fields, "assignee", None)
@@ -574,27 +614,14 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                 if progress_cb and i % 20 == 0:
                     progress_cb(f"Processing ticket {i+1}/{len(changed)}")
 
-            # Embed and store only the new/changed chunks (the unchanged tickets'
-            # chunks are already in the index, untouched). No new chunks → the run
-            # was a no-op refresh, which is a normal success, not an error.
-            if ids:
-                if progress_cb:
-                    progress_cb(f"Embedding {len(ids)} chunks — step + error separately...")
-                step_embs  = embedder.embed(step_texts, embed_model)
-                # Embed only non-None error texts; keep None positions as None
-                error_texts_clean = [t if t else "" for t in error_texts]
-                error_embs_all    = embedder.embed(error_texts_clean, embed_model)
-                error_embs = [emb if error_texts[k] else None
-                              for k, emb in enumerate(error_embs_all)]
+                # Flush as soon as a batch's worth has accumulated — bounds peak memory
+                # to ~_STORE_BATCH chunks' texts + vectors instead of the whole run's.
+                if len(ids) >= _STORE_BATCH:
+                    _flush_batch()
 
-                if progress_cb:
-                    progress_cb("Storing fresh ticket chunks...")
-                # Full rebuild: wipe + recreate the collections HERE — only now that
-                # the new chunks are embedded and ready — so the empty window is a
-                # split second and a mid-run failure never leaves the KB empty.
-                if full:
-                    vectordb.reset_ticket_collections(index_path)
-                vectordb.add_tickets(ids, step_embs, error_embs, display_texts, metas, index_path)
+            # Flush whatever's left (the last, likely-partial batch). No new chunks at
+            # all → the run was a no-op refresh, which is a normal success, not an error.
+            _flush_batch()
 
             # Refresh the BM25 keyword index + ticket graph so hybrid and graph
             # expansion reflect this pass.
@@ -616,7 +643,7 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
 
             # Auto-grade accuracy on the freshly-updated index (background, best-effort)
             # so the self-test score refreshes whenever the data changes — no manual run.
-            if (len(ids) or pruned) and cfg["workaround_finder"].get("selftest_after_ingest", True):
+            if (total_indexed or pruned) and cfg["workaround_finder"].get("selftest_after_ingest", True):
                 def _grade():
                     try:
                         import scorecard
@@ -625,7 +652,7 @@ def ingest_jira(cfg: dict, progress_cb=None, full: bool = False,
                         print(f"[SELFTEST] post-ingest grade skipped: {_e}")
                 threading.Thread(target=_grade, daemon=True).start()
 
-            return {"ok": True, "indexed": len(ids), "skipped": skipped,
+            return {"ok": True, "indexed": total_indexed, "skipped": skipped,
                     "up_to_date": up_to_date, "pruned": pruned,
                     "tickets_indexed": reindexed}
         except Exception as e:
