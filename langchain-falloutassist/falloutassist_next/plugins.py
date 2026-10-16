@@ -217,6 +217,17 @@ class JiraPlugin:
     def _search(self, jql: str, fields: str, limit: int = 0) -> list[dict]:
         return list(self._iter_search(jql, fields, limit))
 
+    def test_jql(self, jql: str) -> dict:
+        """Run a small, read-only Jira search to validate a query from Settings."""
+        data = self._request("GET", "/rest/api/2/search/jql", params={
+            "jql": jql, "maxResults": 5, "fields": "key"})
+        issues = data.get("issues") or []
+        total = data.get("total")
+        return {"total": total if isinstance(total, int) else None,
+                "sample_keys": [str(issue.get("key") or "") for issue in issues
+                                if issue.get("key")],
+                "has_more": bool(data.get("nextPageToken"))}
+
     def inflow_issues(self, limit: int = 0) -> list[dict]:
         jql = required_env("JIRA_INFLOW_JQL")
         field_ids = [config_value("JIRA_FEEDBACK_FIELD_ID"),

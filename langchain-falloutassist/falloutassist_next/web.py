@@ -14,12 +14,13 @@ from urllib.parse import parse_qs
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from itsdangerous import BadSignature, URLSafeSerializer
+from requests import HTTPError, RequestException
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import storage
 from .auth import authenticate, public
 from .config import PROJECT_DIR, database_backend, feedback_secret, session_secret
-from .plugins import registry
+from .plugins import JiraPlugin, registry
 from .specialist_registry import specialist_registry
 from .service import ingest_once, scan_once
 from .workflow import investigate
@@ -233,6 +234,37 @@ def put_settings(body: dict, request: Request, admin: dict = Depends(_admin)):
 @app.get("/api/connections")
 def get_connections(_: dict = Depends(_admin)):
     return storage.connection_snapshot()
+
+
+@app.post("/api/connections/test-jql")
+def test_jql(body: dict, request: Request, _: dict = Depends(_admin)):
+    _check_csrf(request)
+    kind = str(body.get("kind", ""))
+    jql = str(body.get("jql", "")).strip()
+    if kind not in {"history", "inflow"}:
+        raise HTTPException(400, "Choose a history or inflow query")
+    if not jql or len(jql) > 4000:
+        raise HTTPException(400, "Enter a JQL query up to 4,000 characters")
+    try:
+        return JiraPlugin().test_jql(jql)
+    except HTTPError as exc:
+        response = exc.response
+        message = "Jira rejected the request"
+        if response is not None and response.status_code == 400:
+            try:
+                payload = response.json()
+                errors = payload.get("errorMessages") or []
+                message = "; ".join(str(error) for error in errors)[:300] or "Check the JQL syntax and field names"
+            except ValueError:
+                message = "Check the JQL syntax and field names"
+            raise HTTPException(400, f"JQL is invalid: {message}") from exc
+        if response is not None and response.status_code in {401, 403}:
+            raise HTTPException(400, "Jira rejected the saved credentials or search permissions") from exc
+        raise HTTPException(502, "Jira could not complete the query check") from exc
+    except RequestException as exc:
+        raise HTTPException(502, "Could not connect to Jira. Check the Jira URL and network settings") from exc
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.put("/api/connections")
