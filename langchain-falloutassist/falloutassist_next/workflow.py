@@ -392,7 +392,7 @@ def _comment(state: InvestigationState) -> dict:
     elif agreement == "different_procedures":
         lines += ["", "Local and Rovo evidence suggests different procedures; review both before applying either."]
     lines += ["", format_line, feedback_lines,
-              "_Auto-commented by FalloutAssist · FA-SUGGESTION_ "]
+              "_Auto-commented by FalloutAssist LangChain (8012) · FA-LANGCHAIN-8012_ "]
     return {"comment_body": "\n".join(lines).strip()[:8000]}
 
 

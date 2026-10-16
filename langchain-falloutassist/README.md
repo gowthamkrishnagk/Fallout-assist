@@ -137,15 +137,14 @@ signals, not probabilities that a workaround is correct.
 
 ## Jira publishing
 
-Publishing starts disabled and dry run starts enabled. Before live use, stop the
-old application's Jira auto-comment worker so both processes cannot edit the
-same `FA-SUGGESTION` comment. Configure a reachable `public_base_url`, set
-enable publishing in the dashboard, and turn off dry run. The new publisher
-reuses the `FA-SUGGESTION` marker and edits
-an existing marked comment instead of adding a second comment. The local audit
-records a publish intent before the Jira API call and the resulting comment ID
-after success. Use the dashboard's audit verification action to check the hash
-chain.
+The 8012 LangChain app is currently configured for preview only while the
+independent legacy app on 8010 continues to publish Jira comments. Keep
+`publish_enabled` false and `dry_run` true in the 8012 dashboard. LangChain
+comments use the `FA-LANGCHAIN-8012` marker and are kept separate from legacy
+`FA-SUGGESTION` comments. If 8012 publishing is enabled later, configure a
+reachable `public_base_url` and feedback secret first. The local audit records a
+publish intent before the Jira API call and the resulting comment ID after
+success. Use the dashboard's audit verification action to check the hash chain.
 
 The supervisor currently routes Jira suggestions and an optional Salesforce
 read-only specialist. Register new specialists through

@@ -25,7 +25,8 @@ from .history import HistoryIndex, parse_failure, field
 from .quality import source_quality
 from .rulematch import match_approved
 
-MARKER = "FA-SUGGESTION"
+MARKER = "FA-LANGCHAIN-8012"
+BOT_COMMENT_MARKERS = (MARKER, "FA-LEGACY-8010", "FA-SUGGESTION")
 ISSUE_KEY = re.compile(r"[A-Z][A-Z0-9_]{1,29}-[1-9][0-9]{0,9}")
 _AUTO_CLOSURE = re.compile(
     r"(?is)(?:resolved for more than\s+\d+\s+days?\s+with no response|"
@@ -285,7 +286,7 @@ class JiraPlugin:
         for comment in comments:
             body = _text(comment.get("body")).strip()
             author = comment.get("author") or {}
-            if MARKER in body or _is_automatic_closure(
+            if any(marker in body for marker in BOT_COMMENT_MARKERS) or _is_automatic_closure(
                     body, str(author.get("displayName") or "").casefold(),
                     str(author.get("accountType") or "")):
                 continue
@@ -528,7 +529,8 @@ class JiraPlugin:
             query_reason = field(query, "Order Reason", "OrderReason", "Reason")
             query_order_type = field(query, "Order Type", "OrderType")
             query_release = field(query, "Release", "Release Version", "Software Release")
-            comments = [c for c in comments if MARKER not in _text(c.get("body"))]
+            comments = [c for c in comments if not any(
+                marker in _text(c.get("body")) for marker in BOT_COMMENT_MARKERS)]
             choices = []
             assignee_id = (fields.get("assignee") or {}).get("accountId")
             resolved_raw = fields.get("resolutiondate") or ""
