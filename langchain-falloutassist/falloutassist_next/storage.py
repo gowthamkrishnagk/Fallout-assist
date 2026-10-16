@@ -710,6 +710,25 @@ def workaround_rows(order_reason: str = "", step: str = "", error: str = "",
     return result
 
 
+def workaround_version(version_id: str) -> dict | None:
+    """Read one exact procedure version and its applicability context."""
+    with connect() as db:
+        row = db.execute("SELECT v.*,p.order_reason,p.failed_step,p.error_description "
+                         "FROM workaround_versions v JOIN workaround_patterns p "
+                         "ON p.pattern_key=v.pattern_key WHERE v.id=?", (version_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        keys = json.loads(result["source_keys_json"] or "[]")
+        result["source_comments"] = []
+        if keys:
+            placeholders = ",".join("?" for _ in keys)
+            result["source_comments"] = [dict(doc) for doc in db.execute(
+                f"SELECT source_key,body,url,issue_updated FROM source_docs "
+                f"WHERE source_key IN ({placeholders}) ORDER BY issue_updated DESC", keys).fetchall()]
+    return result
+
+
 def current_workaround_version(source_key: str) -> dict | None:
     with connect() as db:
         rows = db.execute("SELECT v.*,p.order_reason,p.failed_step,p.error_description "

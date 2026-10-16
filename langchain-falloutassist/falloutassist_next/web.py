@@ -174,6 +174,17 @@ def record_workaround_outcome(version_id: str, body: dict, request: Request,
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.post("/api/workaround-versions/{version_id}/synthesis")
+def workaround_synthesis(version_id: str, request: Request, admin: dict = Depends(_admin)):
+    _check_csrf(request)
+    version = storage.workaround_version(version_id)
+    if not version:
+        raise HTTPException(404, "Workaround version not found")
+    from .synthesis import prepare_synthesis, source_evidence
+    return {**prepare_synthesis(version, admin["email"]),
+            "original_comments": source_evidence(version)}
+
+
 @app.get("/api/investigations")
 def investigations(limit: int = 100, _: dict = Depends(_admin)):
     if not 1 <= limit <= 500:

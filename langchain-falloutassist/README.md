@@ -38,6 +38,33 @@ resolution is. An investigation's tier is a separate decision about whether a
 new Jira ticket has enough grounded evidence for a suggested workaround. A
 similarity score is not a probability that a fix is correct.
 
+## Readable workaround procedures
+
+Expanding a version in **Find a workaround** calls the authenticated, CSRF-protected
+`POST /api/workaround-versions/{version_id}/synthesis` endpoint. It uses the saved
+Azure chat connection and response temperature to rewrite the exact version as a
+summary, numbered actions, applicability notes and missing details. Full stored
+Jira resolution comments supplement the extracted solution only when that
+solution matches the same version; newer, different fixes cannot leak into old
+versions. Original comments and per-step supporting quotes remain visible.
+
+A LangChain structured-output call writes the procedure, exact source quotes are
+checked in code, and a second model call reviews its factual support. Salesforce
+snapshots, assistant comments and automatic closures cannot become synthesized
+procedures. Unavailable or ungrounded rewrites show a retry state with the source
+still accessible. This feature does not execute fixes, change confidence or post
+Jira comments. Generation and failures are audited, with optional Langfuse traces.
+
+Successful rewrites are cached in application storage (PostgreSQL, or the explicit
+SQLite fallback). Changes to evidence, version, release context, model deployment,
+temperature or synthesis prompt invalidate the cache. Generation occurs only for
+expanded versions; a shared lease prevents duplicate concurrent model calls.
+No re-ingestion is needed when a matching full comment is already stored.
+
+Run the isolated synthesis checks from this directory with
+`python -m unittest discover -s tests -v`. Model calls are mocked and temporary
+databases are used; application data and Jira publishing are not touched.
+
 ## Setup
 
 Use Python 3.11 or 3.12. From this directory:
