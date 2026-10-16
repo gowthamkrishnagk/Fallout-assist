@@ -37,6 +37,19 @@ def _is_automatic_closure(body: str, author_name: str = "", account_type: str = 
     return bool(_AUTO_CLOSURE.search(body or ""))
 
 
+def _is_salesforce_update_comment(body: str) -> bool:
+    """Exclude Salesforce state snapshots and execution logs from Jira fixes."""
+    value = (body or "").casefold()
+    bot_attribution = "updated by the lcpr order fallout tickets bot" in value
+    salesforce_snapshot = "update from salesforce" in value and any(
+        marker in value for marker in (
+            "orderstepid", "order step link", "pr_error_description__c",
+            "lastmodifieddate", "execution log",
+        )
+    )
+    return bot_attribution or salesforce_snapshot
+
+
 def _resolution_text(body: str) -> str:
     value = field(body, "Solution Applied", "Resolution", "Workaround", "Fix")
     return value if value else body
@@ -518,6 +531,8 @@ class JiraPlugin:
                 author_name = str(author.get("displayName") or "").casefold()
                 if _is_automatic_closure(body, author_name, str(author.get("accountType") or "")):
                     continue
+                if _is_salesforce_update_comment(body):
+                    continue
                 created_raw = str(comment.get("created") or "")
                 try:
                     created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
@@ -571,7 +586,13 @@ class JiraPlugin:
             if storage.upsert_document(item, tier, reasons):
                 changed += 1
             if tier in ("high", "medium"):
-                storage.record_workaround(item, selected_created or resolved_raw)
+                version = storage.record_workaround(item, selected_created or resolved_raw)
+                storage.remove_workaround_evidence(key, (version or {}).get("id", ""))
+            else:
+                # A full refresh can downgrade previously accepted evidence. Remove
+                # that source from old workaround versions so stale bot logs cannot
+                # remain published as the current workaround.
+                storage.remove_workaround_evidence(key)
             if len(pending_upserts) + len(pending_deletes) >= 128:
                 flush_index()
         flush_index()

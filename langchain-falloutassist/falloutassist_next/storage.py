@@ -559,6 +559,51 @@ def usable_document_count() -> int:
     return int(row["n"])
 
 
+def remove_workaround_evidence(source_key: str, keep_version_id: str = "") -> None:
+    """Detach a Jira source from stale workaround versions and repair current status."""
+    affected: set[str] = set()
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        versions = db.execute("SELECT * FROM workaround_versions WHERE source_keys_json LIKE ?",
+                              (f'%"{source_key}"%',)).fetchall()
+        for version in versions:
+            if version["id"] == keep_version_id:
+                continue
+            sources = json.loads(version["source_keys_json"] or "[]")
+            if source_key not in sources:
+                continue
+            sources = [key for key in sources if key != source_key]
+            affected.add(version["pattern_key"])
+            if sources:
+                db.execute("UPDATE workaround_versions SET source_keys_json=?,updated_at=? WHERE id=?",
+                           (_json(sources), utc_now(), version["id"]))
+                continue
+            outcomes = db.execute("SELECT COUNT(*) AS n FROM workaround_outcomes WHERE version_id=?",
+                                  (version["id"],)).fetchone()["n"]
+            feedback = db.execute("SELECT COUNT(*) AS n FROM feedback WHERE workaround_version_id=?",
+                                  (version["id"],)).fetchone()["n"]
+            if outcomes or feedback:
+                db.execute("UPDATE workaround_versions SET source_keys_json='[]',status='superseded',updated_at=? WHERE id=?",
+                           (utc_now(), version["id"]))
+            else:
+                db.execute("DELETE FROM workaround_versions WHERE id=?", (version["id"],))
+
+        for pattern_key in affected:
+            candidates = db.execute(
+                "SELECT id FROM workaround_versions WHERE pattern_key=? AND source_keys_json<>'[]' "
+                "ORDER BY latest_resolution_at DESC,version_number DESC", (pattern_key,)).fetchall()
+            current_id = candidates[0]["id"] if candidates else ""
+            db.execute("UPDATE workaround_versions SET status='superseded',updated_at=? "
+                       "WHERE pattern_key=? AND status='current'", (utc_now(), pattern_key))
+            if current_id:
+                db.execute("UPDATE workaround_versions SET status='current',updated_at=? WHERE id=?",
+                           (utc_now(), current_id))
+            remaining = db.execute("SELECT COUNT(*) AS n FROM workaround_versions WHERE pattern_key=?",
+                                   (pattern_key,)).fetchone()["n"]
+            if not remaining:
+                db.execute("DELETE FROM workaround_patterns WHERE pattern_key=?", (pattern_key,))
+
+
 def record_workaround(item: dict, resolution_at: str = "") -> dict | None:
     """Store a distinct, evidence-linked workaround version for one failure pattern."""
     body = " ".join((item.get("workaround_text") or item.get("body") or "").split())
@@ -602,7 +647,8 @@ def record_workaround(item: dict, resolution_at: str = "") -> dict | None:
                 latest_resolution_at=?,status=?,updated_at=? WHERE id=?""",
                 (_json(sources), _json(releases), max(resolution_at, version["latest_resolution_at"] or ""),
                  status, utc_now(), version["id"]))
-            return {"pattern_key": pattern_key, "version": version["version_number"], "status": status}
+            return {"id": version["id"], "pattern_key": pattern_key,
+                    "version": version["version_number"], "status": status}
         max_row = db.execute("SELECT MAX(version_number) AS n FROM workaround_versions WHERE pattern_key=?",
                              (pattern_key,)).fetchone()
         number = int(max_row["n"] or 0) + 1
@@ -616,7 +662,8 @@ def record_workaround(item: dict, resolution_at: str = "") -> dict | None:
              releases_json,source_keys_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (version_id, pattern_key, number, body, body_hash, status, resolution_at,
              _json([release] if release else []), _json([source_key]), utc_now(), utc_now()))
-        return {"pattern_key": pattern_key, "version": number, "status": status}
+        return {"id": version_id, "pattern_key": pattern_key,
+                "version": number, "status": status}
 
 
 def workaround_rows(order_reason: str = "", step: str = "", error: str = "",
