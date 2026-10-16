@@ -40,8 +40,14 @@ similarity score is not a probability that a fix is correct.
 
 ## Readable workaround procedures
 
-Expanding a version in **Find a workaround** calls the authenticated, CSRF-protected
-`POST /api/workaround-versions/{version_id}/synthesis` endpoint. It uses the saved
+Expanding a version in **Find a workaround** shows its stored resolution text
+immediately. The authenticated `GET /api/workaround-versions/{version_id}` endpoint
+loads full original comments and a current saved rewrite without invoking the LLM.
+When no valid saved rewrite exists, the UI separately calls the authenticated,
+CSRF-protected `POST /api/workaround-versions/{version_id}/synthesis` endpoint.
+The original remains readable while AI works, with an elapsed-time indicator.
+Concurrent views share pending browser requests; reopening a saved procedure does
+not start model work. It uses the saved
 Azure chat connection and response temperature to rewrite the exact version as a
 summary, numbered actions, applicability notes and missing details. Full stored
 Jira resolution comments supplement the extracted solution only when that
@@ -60,6 +66,8 @@ SQLite fallback). Changes to evidence, version, release context, model deploymen
 temperature or synthesis prompt invalidate the cache. Generation occurs only for
 expanded versions; a shared lease prevents duplicate concurrent model calls.
 No re-ingestion is needed when a matching full comment is already stored.
+An accidental multiple-response model output gets at most one repair attempt per
+model call, while evidence checks and semantic review still apply.
 
 Run the isolated synthesis checks from this directory with
 `python -m unittest discover -s tests -v`. Model calls are mocked and temporary

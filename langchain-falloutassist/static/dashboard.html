@@ -159,27 +159,46 @@ async function loadWorkarounds(){
 }
 function workaroundVersionCard(v){
   const outcomeSummary=(v.outcomes||[]).filter(o=>Number(o.verified)).map(o=>`${o.source_kind}: ${o.count} ${o.outcome}`).join(' · ')||'No verified outcomes reported';
-  return `<details class="panel" data-version-id="${esc(v.id)}" ontoggle="if(event.target===this&&this.open)loadVersionSynthesis(this)"><summary><b>Version ${esc(v.version_number)}</b> · ${esc(v.status)} · latest evidence ${esc(v.latest_resolution_at||'unknown')}${v.releases?.length?' · releases '+esc(v.releases.join(', ')):''} · ${esc(v.evidence_count||0)} evidence ticket(s) · ${esc(v.high_quality_evidence_count||0)} high quality</summary><p><b>Verified outcomes:</b> ${esc(outcomeSummary)}</p><div class="version-synthesis" role="status" aria-live="polite"><p class="muted">Expand this version to prepare a clearer procedure.</p></div><div class="version-original"><details class="original-comment"><summary>View original resolution text</summary><pre>${esc(v.body)}</pre></details></div><p>Evidence tickets: ${(v.sources||[]).map(s=>jiraAnchor(s.source_key,s.url)).join(', ')||'None linked'}</p></details>`;
+  return `<details class="panel" data-version-id="${esc(v.id)}" ontoggle="if(event.target===this&&this.open)loadVersionSynthesis(this)"><summary><b>Version ${esc(v.version_number)}</b> · ${esc(v.status)} · latest evidence ${esc(v.latest_resolution_at||'unknown')}${v.releases?.length?' · releases '+esc(v.releases.join(', ')):''} · ${esc(v.evidence_count||0)} evidence ticket(s) · ${esc(v.high_quality_evidence_count||0)} high quality</summary><p><b>Verified outcomes:</b> ${esc(outcomeSummary)}</p><div class="version-synthesis" role="status" aria-live="polite"><p class="muted">Expand this version to prepare a clearer procedure.</p></div><div class="version-source resolution-note"><strong>Original Jira note · available now</strong>${readableComment(v.body)}</div><div class="version-original"><details class="original-comment"><summary>View original resolution text</summary><pre>${esc(v.body)}</pre></details></div><p>Evidence tickets: ${(v.sources||[]).map(s=>jiraAnchor(s.source_key,s.url)).join(', ')||'None linked'}</p></details>`;
+}
+const versionRequests=new Map();
+function shareVersionRequest(key,load){if(!versionRequests.has(key)){const request=load().finally(()=>{if(versionRequests.get(key)===request)versionRequests.delete(key)});versionRequests.set(key,request)}return versionRequests.get(key)}
+function renderOriginalComments(details,comments){
+  if(!comments?.length)return;
+  const original=details.querySelector('.version-original'),wasOpen=Boolean(original.querySelector('details')?.open);
+  original.innerHTML=`<details class="original-comment" ${wasOpen?'open':''}><summary>View original Jira resolution comment${comments.length===1?'':'s'}</summary>${comments.map(c=>`<p>${jiraAnchor(c.source_key,c.url)}</p><pre>${esc(c.body)}</pre>`).join('')}</details>`;
+}
+function renderVersionSynthesis(details,result){
+  const host=details.querySelector('.version-synthesis');
+  if(result.status==='ready'){
+    const s=result.synthesis;
+    host.innerHTML=`<div class="resolution-highlight synthesis-procedure"><strong>Suggested procedure · AI rewritten</strong><p>${esc(s.summary)}</p><ol>${(s.steps||[]).map(item=>`<li><p>${esc(item.text)}</p><details class="original-comment"><summary>Source for this step · ${esc(item.source_key)}</summary><blockquote>${esc(item.source_excerpt)}</blockquote></details></li>`).join('')}</ol></div>${s.applicability_note?`<div class="resolution-notice"><strong>Check the step names</strong><p>${esc(s.applicability_note)}</p></div>`:''}${s.missing_information?.length?`<div class="resolution-note"><strong>Details not provided in the source</strong><ul>${s.missing_information.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`:''}<p class="hint">AI rewrites the documented actions; it does not execute or verify them. ${result.cached?'Saved rewrite.':'New rewrite.'} Original Jira evidence is below.</p>`;
+    details.querySelector('.version-source').classList.add('hide');
+    details.dataset.synthesisState='ready';
+  }else{
+    host.innerHTML=`<div class="resolution-notice"><strong>${result.status==='no_action'?'No clear corrective procedure':'Procedure rewrite unavailable'}</strong><p>${esc(result.message)}</p>${result.status==='no_action'?'':'<button type="button" onclick="retryVersionSynthesis(this)">Try again</button>'}</div>`;
+    details.dataset.synthesisState=result.status==='no_action'?'ready':'retry';
+  }
 }
 async function loadVersionSynthesis(details){
   if(details.dataset.synthesisState==='loading'||details.dataset.synthesisState==='ready')return;
   const host=details.querySelector('.version-synthesis');
-  details.dataset.synthesisState='loading';host.innerHTML='<p class="setup-progress">Writing a clearer procedure and checking it against the Jira evidence…</p>';
+  details.dataset.synthesisState='loading';host.innerHTML='<p class="setup-progress">Loading saved procedure… The original Jira note is available below.</p>';
+  let timer;
   try{
-    const result=await api(`/api/workaround-versions/${encodeURIComponent(details.dataset.versionId)}/synthesis`,'POST',{});
-    if(result.original_comments?.length)details.querySelector('.version-original').innerHTML=`<details class="original-comment"><summary>View original Jira resolution comment${result.original_comments.length===1?'':'s'}</summary>${result.original_comments.map(c=>`<p>${jiraAnchor(c.source_key,c.url)}</p><pre>${esc(c.body)}</pre>`).join('')}</details>`;
-    if(result.status==='ready'){
-      const s=result.synthesis;
-      host.innerHTML=`<div class="resolution-highlight synthesis-procedure"><strong>Suggested procedure · AI rewritten</strong><p>${esc(s.summary)}</p><ol>${(s.steps||[]).map(item=>`<li><p>${esc(item.text)}</p><details class="original-comment"><summary>Source for this step · ${esc(item.source_key)}</summary><blockquote>${esc(item.source_excerpt)}</blockquote></details></li>`).join('')}</ol></div>${s.applicability_note?`<div class="resolution-notice"><strong>Check the step names</strong><p>${esc(s.applicability_note)}</p></div>`:''}${s.missing_information?.length?`<div class="resolution-note"><strong>Details not provided in the source</strong><ul>${s.missing_information.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>`:''}<p class="hint">AI rewrites the documented actions; it does not execute or verify them. ${result.cached?'Saved rewrite.':'New rewrite.'} Original Jira evidence is below.</p>`;
-      details.dataset.synthesisState='ready';
-    }else{
-      host.innerHTML=`<div class="resolution-notice"><strong>${result.status==='no_action'?'No clear corrective procedure':'Procedure rewrite unavailable'}</strong><p>${esc(result.message)}</p>${result.status==='no_action'?'':'<button type="button" onclick="retryVersionSynthesis(this)">Try again</button>'}</div>`;
-      details.dataset.synthesisState=result.status==='no_action'?'ready':'retry';
-    }
+    const id=details.dataset.versionId,path=`/api/workaround-versions/${encodeURIComponent(id)}`;
+    const data=await shareVersionRequest(`source:${id}`,()=>api(path));
+    renderOriginalComments(details,data.original_comments);
+    if(data.saved_synthesis){renderVersionSynthesis(details,data.saved_synthesis);return}
+    const started=Date.now();
+    host.innerHTML='<p class="setup-progress">Preparing a clearer version with AI… <span class="generation-elapsed">0 s</span><br><span class="hint">You can read the original Jira note below while this runs. Saved procedures open faster next time.</span></p>';
+    timer=setInterval(()=>{const elapsed=host.querySelector('.generation-elapsed');if(elapsed)elapsed.textContent=`${Math.floor((Date.now()-started)/1000)} s`},1000);
+    const result=await shareVersionRequest(`rewrite:${id}`,()=>api(`${path}/synthesis`,'POST',{}));
+    renderVersionSynthesis(details,result);
   }catch(error){
     host.innerHTML=`<div class="resolution-notice"><strong>Procedure rewrite unavailable</strong><p>${esc(error.message||'Review the original Jira comment below.')}</p><button type="button" onclick="retryVersionSynthesis(this)">Try again</button></div>`;
     details.dataset.synthesisState='retry';
-  }
+  }finally{if(timer)clearInterval(timer)}
 }
 function retryVersionSynthesis(button){const details=button.closest('[data-version-id]');details.dataset.synthesisState='';loadVersionSynthesis(details)}
 function sourcePage(direction){offset=Math.max(0,offset+direction*25);$('sourceDetail').innerHTML='';loadSources()}

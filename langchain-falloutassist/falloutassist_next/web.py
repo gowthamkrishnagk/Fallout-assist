@@ -174,6 +174,17 @@ def record_workaround_outcome(version_id: str, body: dict, request: Request,
         raise HTTPException(400, str(exc)) from exc
 
 
+@app.get("/api/workaround-versions/{version_id}")
+def workaround_version_detail(version_id: str, _: dict = Depends(_admin)):
+    """Serve source comments and valid saved synthesis without starting model work."""
+    version = storage.workaround_version(version_id)
+    if not version:
+        raise HTTPException(404, "Workaround version not found")
+    from .synthesis import cached_synthesis, source_evidence
+    return {"version_id": version_id, "original_comments": source_evidence(version),
+            "saved_synthesis": cached_synthesis(version)}
+
+
 @app.post("/api/workaround-versions/{version_id}/synthesis")
 def workaround_synthesis(version_id: str, request: Request, admin: dict = Depends(_admin)):
     _check_csrf(request)

@@ -8,7 +8,7 @@ import re
 from uuid import uuid4
 
 from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
+from langchain.agents.structured_output import MultipleStructuredOutputsError, ToolStrategy
 from pydantic import BaseModel, Field
 
 from . import storage
@@ -56,8 +56,18 @@ class GroundingReview(BaseModel):
 
 def _structured_call(schema: type[BaseModel], system: str, payload: dict,
                      settings: dict, callbacks: list) -> BaseModel:
+    repairs = 0
+
+    def repair_multiple_outputs(error: Exception) -> str:
+        nonlocal repairs
+        if not isinstance(error, MultipleStructuredOutputsError) or repairs:
+            raise error
+        repairs += 1
+        return "Return exactly ONE structured response containing the complete result, with all steps in its steps list."
+
     agent = create_agent(model=chat_model(settings["temperature"]), tools=[],
-                         response_format=ToolStrategy(schema, handle_errors=False), system_prompt=system)
+                         response_format=ToolStrategy(schema, handle_errors=repair_multiple_outputs),
+                         system_prompt=system + " Return exactly one structured response containing the entire result; never call the response tool separately for individual steps.")
     result = agent.invoke(
         {"messages": [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]},
         config={"callbacks": callbacks, "recursion_limit": 5,
@@ -169,8 +179,8 @@ def synthesize(version: dict, settings: dict) -> tuple[dict, str | None]:
         getattr(handler, "last_trace_id", None) if handler else None)
 
 
-def prepare_synthesis(version: dict, actor: str) -> dict:
-    """Cache by exact evidence, context, prompt and the UI-configured model settings."""
+def _cache_context(version: dict) -> tuple[dict, dict, str, str]:
+    """Keep the cache signature identical for read-only lookups and generation."""
     settings = storage.settings()
     version = {**version, "source_comments": source_evidence(version)}
     fingerprint = hashlib.sha256(json.dumps({
@@ -185,19 +195,31 @@ def prepare_synthesis(version: dict, actor: str) -> dict:
         "temperature": settings["temperature"],
     }, sort_keys=True).encode()).hexdigest()
     cache_key = f"workaround_synthesis:{version['id']}"
+    return version, settings, fingerprint, cache_key
 
-    def cached_result() -> dict | None:
-        raw = storage.get_state(cache_key)
-        if raw:
-            try:
-                cached = json.loads(raw)
-                if cached.get("fingerprint") == fingerprint:
-                    return {**cached["result"], "cached": True}
-            except (ValueError, KeyError, TypeError):
-                pass
-        return None
 
-    cached = cached_result()
+def _cached_result(cache_key: str, fingerprint: str) -> dict | None:
+    raw = storage.get_state(cache_key)
+    if raw:
+        try:
+            cached = json.loads(raw)
+            if cached.get("fingerprint") == fingerprint:
+                return {**cached["result"], "cached": True}
+        except (ValueError, KeyError, TypeError):
+            pass
+    return None
+
+
+def cached_synthesis(version: dict) -> dict | None:
+    """Return a current saved rewrite without invoking or waiting for any model."""
+    _, _, fingerprint, cache_key = _cache_context(version)
+    return _cached_result(cache_key, fingerprint)
+
+
+def prepare_synthesis(version: dict, actor: str) -> dict:
+    """Cache by exact evidence, context, prompt and the UI-configured model settings."""
+    version, settings, fingerprint, cache_key = _cache_context(version)
+    cached = _cached_result(cache_key, fingerprint)
     if cached:
         return cached
     body = version["body"].strip()
@@ -209,7 +231,7 @@ def prepare_synthesis(version: dict, actor: str) -> dict:
     if not storage.claim_lease(lease, holder, 300):
         return {"status": "busy", "message": "A clearer procedure is already being prepared. Try again shortly."}
     try:
-        cached = cached_result()
+        cached = _cached_result(cache_key, fingerprint)
         if cached:
             return cached
         try:

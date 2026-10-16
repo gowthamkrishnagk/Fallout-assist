@@ -8,6 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
 from falloutassist_next import storage, synthesis
 
 FIX = ("Update the addon OLI ID in Salesforce to the correct client plan instance "
@@ -35,7 +39,50 @@ def draft(excerpt=FIX, source_key="SAC-249749"):
     )
 
 
+class ScriptedChatModel(BaseChatModel):
+    responses: list[AIMessage]
+    calls: int = 0
+
+    @property
+    def _llm_type(self):
+        return "isolated-scripted-chat"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        response = self.responses[self.calls]
+        self.calls += 1
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+
 class GroundingTests(unittest.TestCase):
+    def test_multiple_structured_responses_can_be_repaired_once(self):
+        item = draft().model_dump()
+        duplicate = AIMessage(content="", tool_calls=[
+            {"name": "ProcedureSynthesis", "args": item, "id": "one"},
+            {"name": "ProcedureSynthesis", "args": item, "id": "two"}])
+        single = AIMessage(content="", tool_calls=[
+            {"name": "ProcedureSynthesis", "args": item, "id": "corrected"}])
+        model = ScriptedChatModel(responses=[duplicate, single])
+        with patch.object(synthesis, "chat_model", return_value=model):
+            result = synthesis._structured_call(synthesis.ProcedureSynthesis, "test", {},
+                                                {"temperature": 0.1}, [])
+        self.assertEqual(result.model_dump(), item)
+        self.assertEqual(model.calls, 2)
+
+    def test_repeated_multiple_responses_do_not_retry_indefinitely(self):
+        item = draft().model_dump()
+        duplicate = AIMessage(content="", tool_calls=[
+            {"name": "ProcedureSynthesis", "args": item, "id": "one"},
+            {"name": "ProcedureSynthesis", "args": item, "id": "two"}])
+        model = ScriptedChatModel(responses=[duplicate, duplicate, duplicate])
+        with patch.object(synthesis, "chat_model", return_value=model):
+            with self.assertRaises(synthesis.MultipleStructuredOutputsError):
+                synthesis._structured_call(synthesis.ProcedureSynthesis, "test", {},
+                                           {"temperature": 0.1}, [])
+        self.assertEqual(model.calls, 2)
+
     def test_full_comment_preserves_customer_actions(self):
         evidence = synthesis.source_evidence(version())
         self.assertIn("verify successful completion", evidence[0]["body"])
@@ -120,6 +167,42 @@ class PersistenceTests(unittest.TestCase):
         with patch.object(synthesis, "synthesize", return_value=(
                 {"status": "ready", "synthesis": draft().model_dump()}, None)):
             self.assertEqual(synthesis.prepare_synthesis(version(), "tester")["status"], "ready")
+
+    def test_read_only_cache_lookup_never_starts_generation(self):
+        with patch.object(synthesis, "synthesize") as model:
+            self.assertIsNone(synthesis.cached_synthesis(version()))
+            model.assert_not_called()
+        with patch.object(synthesis, "synthesize", return_value=(
+                {"status": "ready", "synthesis": draft().model_dump()}, None)):
+            synthesis.prepare_synthesis(version(), "tester")
+        with patch.object(synthesis, "synthesize") as model:
+            self.assertTrue(synthesis.cached_synthesis(version())["cached"])
+            changed = version()
+            changed["source_comments"][0]["body"] += "\n| Release | R2 |"
+            self.assertIsNone(synthesis.cached_synthesis(changed))
+            model.assert_not_called()
+
+    def test_original_comment_endpoint_does_not_wait_for_ai(self):
+        item = {"source_key": "SAC-249749", "source_type": "ticket", "issue_updated": "2026-08-19",
+                "summary": "Change plan", "step": version()["failed_step"],
+                "error": version()["error_description"], "body": COMMENT, "url": "https://example.invalid",
+                "content_hash": "sample", "order_reason": "Change Plan", "workaround_text": FIX}
+        storage.upsert_document(item, "medium", [])
+        saved = storage.record_workaround(item)
+        with patch.dict(os.environ, {"SESSION_SECRET": "isolated-test-session-key"}):
+            from fastapi.testclient import TestClient
+            from falloutassist_next import web
+        web.app.dependency_overrides[web._admin] = lambda: {"email": "tester"}
+        try:
+            with TestClient(web.app) as client, patch.object(synthesis, "prepare_synthesis") as generate:
+                response = client.get(f"/api/workaround-versions/{saved['id']}")
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("Customer action", response.json()["original_comments"][0]["body"])
+                self.assertIsNone(response.json()["saved_synthesis"])
+                generate.assert_not_called()
+                self.assertEqual(client.get("/api/workaround-versions/missing").status_code, 404)
+        finally:
+            web.app.dependency_overrides.clear()
 
     def test_activity_logs_and_old_assistant_comments_never_call_llm(self):
         for text in ("Update from Salesforce: OrderStepId: a5o123 Execution Log: FATAL",
