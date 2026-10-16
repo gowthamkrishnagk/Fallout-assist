@@ -138,9 +138,9 @@ signals, not probabilities that a workaround is correct.
 ## Jira publishing
 
 The 8012 LangChain app is currently configured for preview only while the
-independent legacy app on 8010 continues to publish Jira comments. Keep
-`publish_enabled` false and `dry_run` true in the 8012 dashboard. LangChain
-comments use the `FA-LANGCHAIN-8012` marker and are kept separate from legacy
+independent legacy app on 8010 continues to publish Jira comments. Use the 8012 dashboard controls to enable or disable publishing. A ticket scan posts only
+when publishing is enabled and preview-only is off; both settings start in preview mode.
+Manual previews never post comments. LangChain comments use the `FA-LANGCHAIN-8012` marker and are kept separate from legacy
 `FA-SUGGESTION` comments. If 8012 publishing is enabled later, configure a
 reachable `public_base_url` and feedback secret first. The local audit records a
 publish intent before the Jira API call and the resulting comment ID after
