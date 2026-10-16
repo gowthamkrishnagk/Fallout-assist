@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from typing import Annotated, TypedDict
 
@@ -329,8 +330,8 @@ def _comment(state: InvestigationState) -> dict:
     rule = state.get("rule")
     top = (state.get("candidates") or [None])[0]
     version = (top.get("workaround_version") or {}) if top and not rule else {}
-    source_key = f"RULE:{rule.get('id', '')}" if rule else (
-        top.get("key") or top.get("filename") or "") if top else ""
+    source_key = (f"RULE:{rule.get('id', '')}" if rule else
+                  ((top.get("key") or top.get("filename") or "") if top else ""))
     source_url = (top.get("url") or "") if top and not rule else ""
     base = settings["public_base_url"].rstrip("/")
     format_token = _token(issue["key"], source_key, "format")
@@ -354,8 +355,6 @@ def _comment(state: InvestigationState) -> dict:
         if version:
             release_label = ", ".join(version.get("releases", [])) or "release not recorded"
             lines.append(f"Workaround library version: v{version.get('version_number')} ({release_label})")
-        if top and not rule:
-            lines.append(f"Historical match score: {float(top.get('score') or 0):.2f} (not a probability of correctness)")
         lines += ["", "Verify the exact order and customer before applying any step, especially a destructive action."]
     elif final_tier == "medium":
         lines = ["*Historical lead — manual verification needed*", "",
@@ -364,6 +363,24 @@ def _comment(state: InvestigationState) -> dict:
     else:
         lines = ["*No reliable workaround found yet*", "",
                  "The available historical evidence does not support a fix for this failure. Investigate manually and record the resolution when closing the ticket."]
+    lines.insert(1, f"Overall confidence: {final_tier.title()}")
+    if not rule:
+        seen = set()
+        matches = []
+        for candidate in state.get("candidates") or []:
+            key = candidate.get("key") or candidate.get("filename") or ""
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            score = candidate.get("composite_score")
+            valid_score = (isinstance(score, (int, float)) and not isinstance(score, bool)
+                           and math.isfinite(score) and 0 <= score <= 1)
+            label = f"{round(score, 4):.1%} match" if valid_score else "match score not recorded"
+            matches.append(f"- {_scrub(str(key))[:100]}: {label}")
+        if matches:
+            lines += ["", "*Top matching past tickets*", *matches,
+                      "Match scores combine retrieval, AI relevance, and outcome feedback using the configured weights; they are not probabilities that a fix will work.",
+                      "These tickets were reviewed as candidates; their actions still require the confidence and applicability checks above."]
     finding = (state.get("specialist_findings") or {}).get("salesforce", {})
     records = finding.get("findings") or []
     if records:
@@ -543,6 +560,8 @@ def investigate(issue_key: str, actor: str, publish: bool = False) -> dict:
         "status": result["status"], "comment_id": result.get("comment_id", ""),
         "comment_body": result["comment_body"],
         "sources": [c.get("key") or c.get("filename") for c in result.get("candidates") or []],
+        "source_keys": ([f"RULE:{result['rule'].get('id', '')}"] if result.get("rule") else
+                        [c.get("key") or c.get("filename") for c in result.get("candidates") or []]),
         "rerank": result.get("rerank", []),
         "trace_id": result.get("trace_id"),
         "reranker_trace_id": result.get("rerank_trace_id"),

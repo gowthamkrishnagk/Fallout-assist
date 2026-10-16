@@ -163,6 +163,12 @@ evidence signal grows relative to human votes. The default composite is
 Weights are configurable in the dashboard and must sum to 100%; the Jira review
 top K is selected from the composite ranking. Candidate component scores and
 LLM rationale are saved with the investigation and shown in its detail view.
+Suggestion reviews show the selected top tickets as clickable Jira IDs with
+their composite match percentages. New comment drafts include the same ticket
+IDs and match percentages beside a separate High/Medium/Low overall confidence.
+The percentage ranks a historical match; it is not the probability a fix will
+work. Missing scores are shown as not recorded, and approved rules do not receive
+an invented ticket match percentage. Existing posted comments are not rewritten.
 
 LLM reranking only orders candidates; the evidence quality gate still controls
 whether a suggestion can be high confidence. If the reranker call fails, the
