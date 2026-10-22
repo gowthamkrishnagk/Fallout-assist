@@ -1,4 +1,4 @@
-"""One-time import of accounts, rules and feedback; no legacy runtime imports."""
+"""One-time import of reviewable rules and feedback; no legacy runtime imports."""
 
 from __future__ import annotations
 
@@ -26,15 +26,7 @@ def migrate(root: Path) -> dict:
     root = root.resolve()
     config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     storage.initialize()
-    counts = {"users": 0, "rules_to_review": 0, "feedback": 0}
-    for user in _records(root, config, "auth", "users_path", "trackers/users.json"):
-        email = str(user.get("email") or "").strip().lower()
-        password_hash = user.get("password_hash") or ""
-        if not email or not password_hash or storage.user_by_email(email):
-            continue
-        storage.create_user(user.get("id") or uuid.uuid4().hex, email, password_hash,
-                            "admin" if user.get("role") == "admin" else "user")
-        counts["users"] += 1
+    counts = {"rules_to_review": 0, "feedback": 0}
     for rule in _records(root, config, "workaround_finder", "rules_path",
                          "trackers/workaround_rules.json"):
         match = rule.get("match") or {}

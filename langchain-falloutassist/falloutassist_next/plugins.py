@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, wait
+from time import monotonic
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass
 from typing import Callable, Protocol
 from urllib.parse import quote
@@ -21,46 +23,18 @@ import requests
 
 from . import storage
 from .config import config_value, required_env
-from .history import HistoryIndex, parse_failure, field
-from .quality import source_quality
+from .history import EMBEDDING_INDEX_VERSION, HistoryIndex, parse_failure, field
+from . import retrieval_pool
+from .execution import remaining
+from .quality import (BOT_COMMENT_MARKERS, SOURCE_POLICY_VERSION, source_quality,
+                      is_automatic_closure as _is_automatic_closure,
+                      is_salesforce_update_comment as _is_salesforce_update_comment,
+                      resolution_text as _resolution_text,
+                      resolution_is_placeholder as _resolution_is_placeholder)
 from .rulematch import match_approved
 
-MARKER = "FA-LANGCHAIN-8012"
-BOT_COMMENT_MARKERS = (MARKER, "FA-LEGACY-8010", "FA-SUGGESTION")
+MARKER = BOT_COMMENT_MARKERS[0]
 ISSUE_KEY = re.compile(r"[A-Z][A-Z0-9_]{1,29}-[1-9][0-9]{0,9}")
-_AUTO_CLOSURE = re.compile(
-    r"(?is)(?:resolved for more than\s+\d+\s+days?\s+with no response|"
-    r"will now be automatically closed|automatically closed due to inactivity)"
-)
-
-
-def _is_automatic_closure(body: str, author_name: str = "", account_type: str = "") -> bool:
-    return bool(_AUTO_CLOSURE.search(body or ""))
-
-
-def _is_salesforce_update_comment(body: str) -> bool:
-    """Exclude Salesforce state snapshots and execution logs from Jira fixes."""
-    value = (body or "").casefold()
-    bot_attribution = "updated by the lcpr order fallout tickets bot" in value
-    salesforce_snapshot = "update from salesforce" in value and any(
-        marker in value for marker in (
-            "orderstepid", "order step link", "pr_error_description__c",
-            "lastmodifieddate", "execution log",
-        )
-    )
-    return bot_attribution or salesforce_snapshot
-
-
-def _resolution_text(body: str) -> str:
-    value = field(body, "Solution Applied", "Resolution", "Workaround", "Fix")
-    return value if value else body
-
-
-def _resolution_is_placeholder(value: str) -> bool:
-    return value.strip().casefold() in {
-        "na", "n/a", "none", "completed the step", "completed step",
-        "retry the step", "retried the step", "done", "fixed", "resolved",
-    }
 
 
 @dataclass(frozen=True)
@@ -100,6 +74,82 @@ def _text(value: object) -> str:
     if isinstance(value, list):
         return " ".join(_text(part) for part in value)
     return ""
+
+
+def _timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except (ValueError, TypeError):
+        return None
+
+
+def _select_resolution_comment(fields: dict, comments: list[dict],
+                               step: str, error: str) -> dict:
+    """One selection policy for owned ingestion and freshly hydrated Rovo cases."""
+    assignee = (fields.get("assignee") or {}).get("accountId")
+    status = str((fields.get("status") or {}).get("name") or "").strip().casefold()
+    if "cancel" in status:
+        return {"body": "", "workaround_text": "", "tier": "low",
+                "reasons": ["Cancelled tickets are excluded from resolution evidence"],
+                "created": "", "resolution_at": "", "comment_id": "",
+                "selection_reason": "excluded_cancelled_ticket"}
+    resolved = _timestamp(fields.get("resolutiondate") or "")
+    choices = []
+    for comment in comments:
+        body = _text(comment.get("body")).strip()
+        if (any(marker in body for marker in BOT_COMMENT_MARKERS)
+                or _is_automatic_closure(body) or _is_salesforce_update_comment(body)):
+            continue
+        created_raw = str(comment.get("created") or "")
+        # Apply the post-resolution age limit to edits as well as new comments.
+        effective_raw = str(comment.get("updated") or created_raw)
+        effective = _timestamp(effective_raw)
+        if resolved and effective and effective > resolved + timedelta(days=14):
+            continue
+        # Quality and eventual quoting must refer to the same bounded evidence.
+        if len(body) > 12000:
+            continue
+        tier, reasons = source_quality("ticket", {"step": step, "error": error}, body)
+        selected = {"body": body, "workaround_text": _resolution_text(body),
+                    "tier": tier, "reasons": reasons, "created": created_raw,
+                    "resolution_at": effective_raw, "comment_id": str(comment.get("id") or "")}
+        author = (comment.get("author") or {}).get("accountId")
+        structured = _resolution_text(body) != body
+        authored_by_assignee = bool(assignee and author == assignee)
+        rank = ({"high": 2, "medium": 1, "low": 0}[tier],
+                effective or datetime.min.replace(tzinfo=timezone.utc),
+                int(authored_by_assignee), int(structured), selected["comment_id"])
+        choices.append((rank, selected, structured, authored_by_assignee))
+    if choices:
+        # Prefer evidence quality first, then the newest comment at that tier.
+        # This lets a newer strong procedure supersede an older strong one,
+        # including when the assignee recorded it as free text. Authorship and
+        # a labelled section break ties only. The fallback still passes the
+        # same corrective-action quality checks.
+        usable = [choice for choice in choices if choice[1]["tier"] != "low"]
+        pool = usable or choices
+        winner = max(pool, key=lambda choice: choice[0])
+        selected = winner[1]
+        reason = ("assignee_authored_fallback" if winner[3] and not winner[2]
+                  else "structured_resolution" if winner[2]
+                  else "comment_body_fallback" if usable else "low_quality_comment")
+        selected["selection_reason"] = reason
+        if reason == "assignee_authored_fallback":
+            selected["reasons"] = [*selected["reasons"],
+                                   "Assignee-authored free-form resolution used as fallback"]
+        return selected
+    return {"body": "", "workaround_text": "", "tier": "low",
+            "reasons": ["No usable resolution comment"], "created": "",
+            "resolution_at": "", "comment_id": "", "selection_reason": "none"}
+
+
+def _resolution_context(query: str, body: str) -> dict:
+    def value(*names: str) -> str:
+        return field(body, *names) or field(query, *names)
+    return {"order_reason": value("Order Reason", "OrderReason", "Reason"),
+            "order_type": value("Order Type Failed", "Order Type", "OrderType"),
+            "release": value("Release", "Release Version", "Software Release")}
 
 
 def _query(issue: dict) -> tuple[str, str, str]:
@@ -168,7 +218,7 @@ class JiraPlugin:
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         response = self._client().request(
-            method, self.base_url() + path, timeout=45, **kwargs)
+            method, self.base_url() + path, timeout=remaining(45), **kwargs)
         response.raise_for_status()
         return response.json() if response.content else {}
 
@@ -281,37 +331,17 @@ class JiraPlugin:
             comments = self._comments(key)
         query_issue = {**raw, "fields": {**fields, "comment": {"comments": comments}}}
         query_text, step, error = _query(query_issue)
-        choices = []
-        assignee_id = (fields.get("assignee") or {}).get("accountId")
-        for comment in comments:
-            body = _text(comment.get("body")).strip()
-            author = comment.get("author") or {}
-            if any(marker in body for marker in BOT_COMMENT_MARKERS) or _is_automatic_closure(
-                    body, str(author.get("displayName") or "").casefold(),
-                    str(author.get("accountType") or "")):
-                continue
-            solution = _resolution_text(body)
-            if _resolution_is_placeholder(solution):
-                continue
-            tier, reasons = source_quality("ticket", {"step": step, "error": error}, solution)
-            if tier == "low":
-                continue
-            choices.append(({"high": 2, "medium": 1}[tier],
-                            int(bool(assignee_id and author.get("accountId") == assignee_id)),
-                            str(comment.get("updated") or comment.get("created") or ""),
-                            body, tier, reasons))
-        if not choices:
+        selected = _select_resolution_comment(fields, comments, step, error)
+        if selected["tier"] == "low":
             return None
-        _, _, resolved_at, body, tier, reasons = max(choices)
-        resolution = _resolution_text(body)
+        body = selected["body"]
         return {"type": "ticket", "key": key, "summary": _text(fields.get("summary")),
-                "url": f"{self.base_url()}/browse/{key}", "comment": body[:12000],
-                "workaround_text": resolution[:5000], "step": step, "error": error,
-                "order_reason": field(query_text, "Order Reason", "OrderReason", "Reason"),
-                "order_type": field(query_text, "Order Type", "OrderType"),
-                "release": field(query_text, "Release", "Release Version", "Software Release"),
-                "resolution_at": resolved_at, "source_tier": tier,
-                "source_reasons": reasons, "retrieval_origins": ["rovo"],
+                "url": f"{self.base_url()}/browse/{key}", "comment": body,
+                "workaround_text": selected["workaround_text"], "step": step, "error": error,
+                **_resolution_context(query_text, body),
+                "resolution_at": selected["resolution_at"], "source_tier": selected["tier"],
+                "resolution_selection": selected.get("selection_reason", ""),
+                "source_reasons": selected["reasons"], "retrieval_origins": ["rovo"],
                 "score": 0.0, "retrieval_score": 0.0, "rank_score": 0.0,
                 "workaround_version": storage.current_workaround_version(key),
                 "feedback_net": storage.feedback_net(
@@ -328,11 +358,67 @@ class JiraPlugin:
                              json={"body": body})
         return str(data["id"])
 
+    def search_local_history(self, query_text: str, top_k: int, min_score: float,
+                             exclude_keys: set[str]) -> dict:
+        return self.search_history(query_text, top_k, min_score, exclude_keys, local_only=True)
+
+    def search_rovo_candidates(self, query_text: str, top_k: int,
+                               exclude_keys: set[str]) -> dict:
+        """MCP-only adapter; graph edges own escalation decisions."""
+        from .rovo import semantic_issue_keys
+        keys = list(dict.fromkeys(key for key in semantic_issue_keys(query_text, min(30, top_k * 2))
+                                  if ISSUE_KEY.fullmatch(key) and key not in exclude_keys))[:30]
+        scoped = [key for key in keys if key.startswith("SAC-")]
+        if scoped:
+            rows = self._search('project = SAC AND status in (Resolved, Closed) AND key in ('
+                                + ','.join(scoped) + ')', 'status', len(scoped))
+            allowed = {row['key'] for row in rows}
+            scoped = [key for key in scoped if key in allowed]
+        rejected = set(keys) - set(scoped)
+        candidates, failures = [], []
+        queue, pending = deque(scoped), {}
+        while queue or pending:
+            while queue and len(pending) < 8:
+                remaining(45)
+                try:
+                    future = retrieval_pool.submit(self.fetch_resolution_candidate, queue[0])
+                except retrieval_pool.RetrievalBusy:
+                    if not pending:
+                        failures.append("unavailable")
+                        queue.clear()
+                    break
+                pending[future] = queue.popleft()
+            if not pending:
+                break
+            completed, _ = wait(pending, timeout=remaining(45), return_when=FIRST_COMPLETED)
+            if not completed:
+                for future in pending:
+                    future.cancel()
+                failures.append("timeout")
+                break
+            for future in completed:
+                key = pending.pop(future)
+                try:
+                    candidate = future.result()
+                    if candidate:
+                        candidate["retrieval_origins"] = ["rovo"]
+                        candidate["rovo_rank"] = keys.index(key) + 1
+                        candidates.append(candidate)
+                    else:
+                        rejected.add(key)
+                except Exception as exc:
+                    from .retrieval_routing import failure_status
+                    failures.append(failure_status(exc))
+        candidates.sort(key=lambda item: item["rovo_rank"])
+        return {"candidates": candidates[:top_k], "rejected_keys": sorted(rejected),
+                "status": "partial" if failures and candidates else failures[0] if failures else "success"}
+
     def search_history(self, query_text: str, retrieval_top_k: int, min_score: float,
-                       exclude_keys: set[str] | None = None) -> dict:
+                       exclude_keys: set[str] | None = None,
+                       local_only: bool = False) -> dict:
         excluded = exclude_keys or set()
         backend = config_value("JIRA_HISTORY_BACKEND").lower()
-        if backend == "local":
+        if local_only or backend == "local":
             local = HistoryIndex().search(query_text, retrieval_top_k, min_score, excluded)
             for candidate in local["candidates"]:
                 candidate["retrieval_origins"] = ["local"]
@@ -345,22 +431,28 @@ class JiraPlugin:
             raise ValueError("JIRA_HISTORY_BACKEND must be 'rovo' or 'local'")
 
         from .rovo import semantic_issue_keys
-        # Run the independent retrievers concurrently, then combine their ranks.
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="falloutassist-retrieval") as pool:
-            local_future = pool.submit(
-                HistoryIndex().search, query_text, 100, min_score, excluded)
-            rovo_future = pool.submit(
+        # Submit remote discovery first, then run local search concurrently. Do
+        # not use an executor context manager here: its exit waits for timed-out
+        # work and would silently defeat the local-fallback deadline.
+        started = monotonic()
+        budget = storage.settings()["rovo_retrieval_budget_seconds"]
+        deadline = started + budget
+        local = rovo_keys = rovo_future = None
+        failures = {}
+        try:
+            rovo_future = retrieval_pool.submit(
                 semantic_issue_keys, query_text, max(10, retrieval_top_k * 4))
-            local = None
-            rovo_keys = None
-            failures = {}
+        except Exception as exc:
+            failures["rovo"] = type(exc).__name__
+        try:
+            local = HistoryIndex().search(query_text, 100, min_score, excluded)
+        except Exception as exc:
+            failures["local"] = type(exc).__name__
+        if rovo_future is not None:
             try:
-                local = local_future.result()
+                rovo_keys = rovo_future.result(timeout=max(0, deadline - monotonic()))
             except Exception as exc:
-                failures["local"] = type(exc).__name__
-            try:
-                rovo_keys = rovo_future.result()
-            except Exception as exc:
+                rovo_future.cancel()
                 failures["rovo"] = type(exc).__name__
 
         if local is None and rovo_keys is None:
@@ -382,21 +474,45 @@ class JiraPlugin:
         rovo_rank = {key: rank for rank, key in enumerate(rovo_keys, 1)}
         candidates_by_key = dict(by_key)
         rovo_candidates: dict[str, dict] = {}
+        hydrated_keys: set[str] = set()
         fetch_failures: dict[str, int] = {}
         fetch_keys = [key for key in rovo_keys[:min(30, max(10, retrieval_top_k * 2))]
                       if key not in excluded]
-        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="falloutassist-rovo-fetch") as pool:
-            fetch_futures = {pool.submit(self.fetch_resolution_candidate, key): key
-                             for key in fetch_keys}
-            for future in fetch_futures:
-                key = fetch_futures[future]
+        fetch_futures, queue = {}, deque(fetch_keys)
+        while (queue or fetch_futures) and monotonic() < deadline:
+            while queue and len(fetch_futures) < 8 and monotonic() < deadline:
+                try:
+                    future = retrieval_pool.submit(self.fetch_resolution_candidate, queue[0])
+                except retrieval_pool.RetrievalBusy:
+                    if not fetch_futures:
+                        fetch_failures["RetrievalBusy"] = len(queue)
+                        queue.clear()
+                    break
+                except Exception as exc:
+                    fetch_failures[type(exc).__name__] = fetch_failures.get(type(exc).__name__, 0) + 1
+                    queue.popleft()
+                    continue
+                fetch_futures[future] = queue.popleft()
+            if not fetch_futures:
+                break
+            completed, _ = wait(fetch_futures, timeout=max(0, deadline - monotonic()),
+                                return_when=FIRST_COMPLETED)
+            if not completed:
+                break
+            for future in completed:
+                key = fetch_futures.pop(future)
                 try:
                     candidate = future.result()
+                    hydrated_keys.add(key)
                 except Exception as exc:
                     fetch_failures[type(exc).__name__] = fetch_failures.get(type(exc).__name__, 0) + 1
                     candidate = None
                 if candidate:
                     rovo_candidates[key] = candidate
+        if fetch_futures or queue:
+            for future in fetch_futures:
+                future.cancel()
+            fetch_failures["TimeoutError"] = len(fetch_futures) + len(queue)
         if fetch_failures:
             failures["rovo_fetch"] = ",".join(
                 f"{name}:{count}" for name, count in sorted(fetch_failures.items()))
@@ -405,12 +521,17 @@ class JiraPlugin:
                 continue
             fetched = rovo_candidates.get(key)
             row = storage.source_document(key)
+            if key in hydrated_keys and fetched is None:
+                # A successful fetch rejected the evidence; an old local copy
+                # must not reintroduce it. Network failures still allow fallback.
+                candidates_by_key.pop(key, None)
+                continue
             if key not in candidates_by_key and fetched:
                 candidates_by_key[key] = fetched
             elif key in candidates_by_key:
                 candidate = candidates_by_key[key]
                 candidate["retrieval_origins"] = ["local", "rovo"]
-                if fetched and fetched.get("resolution_at", "") > (row.get("metadata", {}).get("resolution_at", "") if row else ""):
+                if fetched:
                     candidate.update({k: v for k, v in fetched.items()
                                       if k not in {"score", "retrieval_score", "rank_score", "feedback_net"}})
                 candidate["retrieval_origins"] = ["local", "rovo"]
@@ -476,6 +597,8 @@ class JiraPlugin:
             "local_candidates": local_candidates[:retrieval_top_k],
             "rovo_candidates": branch_rovo_candidates[:retrieval_top_k],
             "rovo_fetched_count": len(rovo_candidates),
+            "retrieval_elapsed_ms": round((monotonic() - started) * 1000),
+            "rovo_budget_seconds": budget,
         }
 
     def approved_rule(self, query_text: str) -> dict | None:
@@ -487,11 +610,16 @@ class JiraPlugin:
         # Jira includes the first page of comments with each search result. Use
         # those comments for the common case so a large history ingest does not
         # make one extra HTTP request per issue.
-        previous_keys = set(storage.all_document_keys())
+        previous_keys = set(storage.all_document_keys("ticket"))
         index = HistoryIndex()
+        refresh_vectors = storage.get_state("embedding_index_version") != EMBEDDING_INDEX_VERSION
         if full:
             index.reset()
+        if full or refresh_vectors:
+            from .documents import restore_document_index
+            restore_document_index(index)
         changed = skipped = 0
+        new_documents = updated_documents = 0
         reindexed = 0
         seen: set[str] = set()
         pending_upserts: list[dict] = []
@@ -514,7 +642,9 @@ class JiraPlugin:
             fields = issue.get("fields") or {}
             updated = fields.get("updated") or ""
             prior = storage.source_document(key)
-            if prior and prior["issue_updated"] == updated and not full:
+            policy_current = bool(prior and (prior.get("metadata") or {}).get(
+                "source_policy_version") == SOURCE_POLICY_VERSION)
+            if prior and prior["issue_updated"] == updated and not full and policy_current and not refresh_vectors:
                 skipped += 1
                 continue
             inline = fields.get("comment") or {}
@@ -526,52 +656,14 @@ class JiraPlugin:
                 comments = self._comments(key)
             query_issue = {**issue, "fields": {**fields, "comment": {"comments": comments}}}
             query, step, error = _query(query_issue)
-            query_reason = field(query, "Order Reason", "OrderReason", "Reason")
-            query_order_type = field(query, "Order Type", "OrderType")
-            query_release = field(query, "Release", "Release Version", "Software Release")
-            comments = [c for c in comments if not any(
-                marker in _text(c.get("body")) for marker in BOT_COMMENT_MARKERS)]
-            choices = []
-            assignee_id = (fields.get("assignee") or {}).get("accountId")
+            selected = _select_resolution_comment(fields, comments, step, error)
+            body, workaround_text = selected["body"], selected["workaround_text"]
+            tier, reasons = selected["tier"], selected["reasons"]
             resolved_raw = fields.get("resolutiondate") or ""
-            try:
-                resolved_at = datetime.fromisoformat(resolved_raw.replace("Z", "+00:00"))
-            except ValueError:
-                resolved_at = None
-            for comment in comments:
-                body = _text(comment.get("body")).strip()
-                author = comment.get("author") or {}
-                author_name = str(author.get("displayName") or "").casefold()
-                if _is_automatic_closure(body, author_name, str(author.get("accountType") or "")):
-                    continue
-                if _is_salesforce_update_comment(body):
-                    continue
-                created_raw = str(comment.get("created") or "")
-                try:
-                    created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                except ValueError:
-                    created_at = None
-                if resolved_at and created_at and created_at > resolved_at + timedelta(days=14):
-                    continue
-                solution = _resolution_text(body)
-                if _resolution_is_placeholder(solution):
-                    tier, reasons = "low", ["Resolution field contains only a placeholder"]
-                else:
-                    tier, reasons = source_quality("ticket", {"step": step, "error": error}, solution)
-                author_id = (comment.get("author") or {}).get("accountId")
-                from_assignee = int(bool(assignee_id and author_id == assignee_id))
-                choices.append(({"high": 2, "medium": 1, "low": 0}[tier], from_assignee,
-                                created_raw, body, solution, tier, reasons))
-            if choices:
-                _, _, selected_created, body, workaround_text, tier, reasons = max(choices)
-            else:
-                selected_created = ""
-                workaround_text = ""
-                body, tier, reasons = "", "low", ["No usable resolution comment"]
-            resolution_context = f"{_text(fields.get('summary'))}\n{_text(fields.get('description'))}\n{body}"
-            order_reason = field(resolution_context, "Order Reason", "OrderReason", "Reason") or query_reason
-            order_type = field(resolution_context, "Order Type", "OrderType") or query_order_type
-            release = field(resolution_context, "Release", "Release Version", "Software Release") or query_release
+            selected_created = selected["resolution_at"]
+            context = _resolution_context(query, body)
+            order_reason, order_type, release = (context[name] for name in
+                                                 ("order_reason", "order_type", "release"))
             item = {
                 "source_key": key, "source_type": "ticket", "issue_updated": updated,
                 "summary": _text(fields.get("summary")), "step": step, "error": error,
@@ -579,11 +671,15 @@ class JiraPlugin:
                 "order_reason": order_reason,
                 "workaround_text": workaround_text,
                 "metadata": {"order_reason": order_reason, "order_type": order_type,
-                             "release": release, "resolution_at": selected_created or resolved_raw},
+                             "release": release, "resolution_at": selected_created or resolved_raw,
+                             "source_policy_version": SOURCE_POLICY_VERSION,
+                             "resolution_comment_id": selected["comment_id"],
+                             "resolution_selection": selected.get("selection_reason", "")},
                 "content_hash": hashlib.sha256((query + body + order_reason + order_type + release +
-                                                 (selected_created or resolved_raw) + workaround_text).encode()).hexdigest(),
+                                                 (selected_created or resolved_raw) + workaround_text +
+                                                 SOURCE_POLICY_VERSION).encode()).hexdigest(),
             }
-            if (not full and prior and prior["content_hash"] == item["content_hash"]
+            if (not full and not refresh_vectors and policy_current and prior and prior["content_hash"] == item["content_hash"]
                 and storage.source_tier("ticket", key) == tier):
                 storage.upsert_document(item, tier, reasons)
                 skipped += 1
@@ -598,9 +694,14 @@ class JiraPlugin:
                 reindexed += int(full)
             if storage.upsert_document(item, tier, reasons):
                 changed += 1
+                if prior is None:
+                    new_documents += 1
+                else:
+                    updated_documents += 1
             if tier in ("high", "medium"):
                 version = storage.record_workaround(item, selected_created or resolved_raw)
-                storage.remove_workaround_evidence(key, (version or {}).get("id", ""))
+                storage.remove_workaround_evidence(key, (version or {}).get("id", ""),
+                                                   preserve_history=True)
             else:
                 # A full refresh can downgrade previously accepted evidence. Remove
                 # that source from old workaround versions so stale bot logs cannot
@@ -618,11 +719,14 @@ class JiraPlugin:
             index.delete(key)
             storage.remove_document(key)
             changed += 1
-        if changed:
+        storage.set_state("embedding_index_version", EMBEDDING_INDEX_VERSION)
+        if changed or refresh_vectors or full:
             storage.set_state("corpus_version", storage.utc_now())
         result = {"ok": True, "full_rebuild": full, "fetched": fetched,
                   "indexed": reindexed if full else changed,
                   "changed_documents": changed, "skipped": skipped,
+                  "new_documents": new_documents, "updated_documents": updated_documents,
+                  "removed_documents": len(missing_keys),
                   "quality_counts": storage.source_counts()}
         storage.audit(actor, "ingest_completed", "jira", result)
         return result

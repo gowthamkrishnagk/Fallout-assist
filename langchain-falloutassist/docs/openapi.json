@@ -1,0 +1,3438 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FalloutAssist API",
+    "description": "FalloutAssist workaround and management APIs. Under Configurations → FalloutAssist API, name and generate a key, then copy it once. In Swagger Authorize, enter the key alone. Service requests send Authorization: Bearer <key>. Browser dashboard access remains open in this deployment; browser mutations require a session CSRF token. The service key authorizes management operations as well as agent jobs. Current deployment TLS trust is configured separately in each API client.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Home",
+        "operationId": "home__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ]
+      }
+    },
+    "/api/session": {
+      "get": {
+        "summary": "Me",
+        "operationId": "me_api_session_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ]
+      }
+    },
+    "/api/dashboard": {
+      "get": {
+        "summary": "Dashboard",
+        "operationId": "dashboard_api_dashboard_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Ingestion APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/documents": {
+      "get": {
+        "summary": "Document List",
+        "operationId": "document_list_api_documents_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Documents and SOP APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Document Upload",
+        "operationId": "document_upload_api_documents_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_document_upload_api_documents_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Documents and SOP APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/documents/{document_id}": {
+      "get": {
+        "summary": "Document Detail",
+        "operationId": "document_detail_api_documents__document_id__get",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Documents and SOP APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Document Delete",
+        "operationId": "document_delete_api_documents__document_id__delete",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Documents and SOP APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/documents/{document_id}/file": {
+      "get": {
+        "summary": "Document File",
+        "operationId": "document_file_api_documents__document_id__file_get",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Documents and SOP APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/documents/{document_id}/index": {
+      "post": {
+        "summary": "Document Reindex",
+        "operationId": "document_reindex_api_documents__document_id__index_post",
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Document Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Documents and SOP APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/sources": {
+      "get": {
+        "summary": "Sources",
+        "operationId": "sources_api_sources_get",
+        "parameters": [
+          {
+            "name": "tier",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Tier"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/sources/{source_key}": {
+      "get": {
+        "summary": "Source Detail",
+        "operationId": "source_detail_api_sources__source_key__get",
+        "parameters": [
+          {
+            "name": "source_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/workarounds": {
+      "get": {
+        "summary": "Workarounds",
+        "operationId": "workarounds_api_workarounds_get",
+        "parameters": [
+          {
+            "name": "order_reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Order Reason"
+            }
+          },
+          {
+            "name": "step",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Step"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Error"
+            }
+          },
+          {
+            "name": "issue_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Issue Key"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/workaround-versions/{version_id}/outcomes": {
+      "post": {
+        "summary": "Record Workaround Outcome",
+        "operationId": "record_workaround_outcome_api_workaround_versions__version_id__outcomes_post",
+        "parameters": [
+          {
+            "name": "version_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Version Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/workaround-versions/{version_id}": {
+      "get": {
+        "summary": "Workaround Version Detail",
+        "description": "Serve source comments and valid saved synthesis without starting model work.",
+        "operationId": "workaround_version_detail_api_workaround_versions__version_id__get",
+        "parameters": [
+          {
+            "name": "version_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Version Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/workaround-versions/{version_id}/synthesis": {
+      "post": {
+        "summary": "Workaround Synthesis",
+        "operationId": "workaround_synthesis_api_workaround_versions__version_id__synthesis_post",
+        "parameters": [
+          {
+            "name": "version_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Version Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/investigations": {
+      "get": {
+        "summary": "Investigations",
+        "operationId": "investigations_api_investigations_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/investigations/{investigation_id}": {
+      "get": {
+        "summary": "Investigation",
+        "operationId": "investigation_api_investigations__investigation_id__get",
+        "parameters": [
+          {
+            "name": "investigation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Investigation Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/feedback": {
+      "get": {
+        "summary": "Feedback List",
+        "operationId": "feedback_list_api_feedback_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "summary": "Audit List",
+        "operationId": "audit_list_api_audit_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/audit/verify": {
+      "get": {
+        "summary": "Audit Verify",
+        "operationId": "audit_verify_api_audit_verify_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "summary": "Get all runtime configuration",
+        "operationId": "get_settings_api_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ],
+        "description": "All top-K, relevance, time-budget, cache, scheduler and publishing values."
+      },
+      "put": {
+        "summary": "Update runtime configuration",
+        "operationId": "put_settings_api_settings_put",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistSettings"
+              },
+              "example": {
+                "retrieval_top_k": 20,
+                "rerank_pool_k": 20,
+                "jira_review_top_k": 5,
+                "rovo_mcp_always_search": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistSettings"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Partial update; unspecified values stay unchanged. Weights must sum to 1; jira_review_top_k <= rerank_pool_k <= retrieval_top_k. Schedule intervals use minutes; zero disables that task. Changes apply to subsequent work."
+      }
+    },
+    "/api/connections": {
+      "get": {
+        "summary": "Get connections and saved JQL",
+        "operationId": "get_connections_api_connections_get",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistConnections"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ],
+        "description": "Returns non-secret values and configured-secret flags. It never returns saved API keys, tokens or passwords."
+      },
+      "put": {
+        "summary": "Update connections or JQL",
+        "operationId": "put_connections_api_connections_put",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistConnectionsUpdate"
+              },
+              "example": {
+                "JIRA_INGEST_JQL": "project = SAC AND status in (Resolved, Closed) ORDER BY updated DESC"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistConnections"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Partial update. Omit secrets to preserve them; an empty secret clears it. Named FalloutAssist API keys are managed through /api/falloutassist-api-keys. History/inflow JQL is saved here, not in runtime settings."
+      }
+    },
+    "/api/rovo-a2a": {
+      "get": {
+        "summary": "Rovo A2A Status",
+        "operationId": "rovo_a2a_status_api_rovo_a2a_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Rovo Agent APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/rovo-a2a/connect": {
+      "post": {
+        "summary": "Rovo A2A Connect",
+        "operationId": "rovo_a2a_connect_api_rovo_a2a_connect_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Rovo Agent APIs"
+        ],
+        "security": [
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Browser-bound OAuth. Start from the dashboard and complete consent in the same browser. The FalloutAssist service key does not replace Atlassian OAuth or organization approval."
+      }
+    },
+    "/api/rovo-a2a/callback": {
+      "get": {
+        "summary": "Rovo A2A Callback",
+        "operationId": "rovo_a2a_callback_api_rovo_a2a_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Rovo Agent APIs"
+        ],
+        "security": [],
+        "description": "Atlassian browser redirect only. Requires the session that started sign-in; do not call this endpoint manually."
+      }
+    },
+    "/api/rovo-a2a/disconnect": {
+      "post": {
+        "summary": "Rovo A2A Disconnect",
+        "operationId": "rovo_a2a_disconnect_api_rovo_a2a_disconnect_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Rovo Agent APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/rovo-a2a/preview": {
+      "post": {
+        "summary": "Rovo A2A Preview",
+        "operationId": "rovo_a2a_preview_api_rovo_a2a_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Rovo Agent APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/knowledge/jobs": {
+      "post": {
+        "summary": "Submit a FalloutAssist agent job",
+        "description": "Returns immediately. The job supplies separate FalloutAssist/Rovo proposals with citations; it never executes fixes or posts comments. Queue capacity errors return 429 with Retry-After.",
+        "operationId": "start_knowledge_job_api_knowledge_jobs_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistJobRequest"
+              },
+              "example": {
+                "issue_key": "SAC-12345"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; poll status_url",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistJobAccepted"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "429": {
+            "description": "Job queue full. Retry later.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Suggested retry delay in seconds."
+              }
+            }
+          }
+        },
+        "tags": [
+          "Main APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/knowledge/jobs/{job_id}": {
+      "get": {
+        "summary": "Poll a FalloutAssist agent job",
+        "operationId": "get_knowledge_job_api_knowledge_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistJobStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "404": {
+            "description": "Unknown or invalid job ID."
+          }
+        },
+        "tags": [
+          "Main APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          }
+        ],
+        "description": "Poll every 2–5 seconds with a bounded client deadline. Partial results may be usable while Rovo is pending. Inspect each proposal's review_required and execution_guidance; ready never means approved for execution."
+      }
+    },
+    "/api/semantic-cache/clear": {
+      "post": {
+        "summary": "Clear Semantic Cache",
+        "operationId": "clear_semantic_cache_api_semantic_cache_clear_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/connections/test-jql": {
+      "post": {
+        "summary": "Preview a JQL filter without saving",
+        "operationId": "test_jql_api_connections_test_jql_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistJqlPreviewRequest"
+              },
+              "example": {
+                "kind": "history",
+                "jql": "project = SAC AND status in (Resolved, Closed) ORDER BY updated DESC"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Ingestion APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Read-only Jira query preview. Does not start ingestion or change the saved JQL."
+      }
+    },
+    "/api/falloutassist-api-keys": {
+      "get": {
+        "summary": "List FalloutAssist API key records",
+        "description": "Returns created and active counts plus each key's name, prefix, creation time, last use and revocation status. Key values and verifiers are never returned.",
+        "operationId": "get_falloutassist_api_keys_api_falloutassist_api_keys_get",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistApiKeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create a named FalloutAssist API key",
+        "operationId": "create_falloutassist_api_key_api_falloutassist_api_keys_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistApiKeyCreate"
+              },
+              "example": {
+                "name": "Deep Agent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; plaintext key is returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistApiKeyCreated"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Creates and saves a key immediately. The plaintext key is returned once for copying; only its verifier and metadata are stored. It remains active until revoked."
+      }
+    },
+    "/api/falloutassist-api-keys/{key_id}": {
+      "delete": {
+        "summary": "Revoke a FalloutAssist API key",
+        "operationId": "delete_falloutassist_api_key_api_falloutassist_api_keys__key_id__delete",
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistApiKeyRevoked"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Configuration APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Revokes the named key immediately while retaining its metadata in the key list."
+      }
+    },
+    "/api/ingest": {
+      "post": {
+        "summary": "Refresh or rebuild Jira history",
+        "operationId": "ingest_api_ingest_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistIngestRequest"
+              },
+              "example": {
+                "full": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistIngestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Ingestion APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Synchronous: can take minutes. full=false refreshes incrementally; full=true rebuilds vectors and restores uploaded-document indexing. Uses saved history JQL; existing mass-prune safeguards apply. A concurrent ingest returns 200 with ok=false,busy=true. Does not post Jira comments."
+      }
+    },
+    "/api/ingestion/status": {
+      "get": {
+        "summary": "Get ingestion totals and latest-run changes",
+        "description": "Stored/searchable/excluded Jira totals exclude SOP passages. Latest completed run reports new, content-updated, removed and skipped tickets. Older records can omit the new counters.",
+        "operationId": "ingestion_status_api_ingestion_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistIngestionStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Ingestion APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/scan": {
+      "post": {
+        "summary": "Review new tickets now",
+        "operationId": "scan_api_scan_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Main APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "May post Jira comments when saved publishing settings permit it and final evidence/review checks pass. Use /api/preview or knowledge jobs for read-only integration."
+      }
+    },
+    "/api/preview": {
+      "post": {
+        "summary": "Preview a workaround",
+        "operationId": "preview_api_preview_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FalloutAssistPreviewRequest"
+              },
+              "example": {
+                "issue_key": "SAC-12345"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FalloutAssistPreview"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Main APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ],
+        "description": "Runs the configured retrieval graph and final evidence gate. Never posts a Jira comment."
+      }
+    },
+    "/api/rules": {
+      "get": {
+        "summary": "List Rules",
+        "operationId": "list_rules_api_rules_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {},
+          {
+            "FalloutAssistApiKey": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create Rule",
+        "operationId": "create_rule_api_rules_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/rules/{rule_id}/approve": {
+      "post": {
+        "summary": "Approve Rule",
+        "operationId": "approve_rule_api_rules__rule_id__approve_post",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Rule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/api/rules/{rule_id}/deprecate": {
+      "post": {
+        "summary": "Deprecate Rule",
+        "operationId": "deprecate_rule_api_rules__rule_id__deprecate_post",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Rule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, issue key or operation input."
+          },
+          "401": {
+            "description": "Missing required key, or a supplied API key is invalid."
+          },
+          "403": {
+            "description": "Browser mutation is missing a valid session CSRF token."
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ],
+        "security": [
+          {
+            "FalloutAssistApiKey": []
+          },
+          {
+            "BrowserCSRF": []
+          }
+        ]
+      }
+    },
+    "/feedback/{token}": {
+      "get": {
+        "summary": "Feedback Page",
+        "operationId": "feedback_page_feedback__token__get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ]
+      },
+      "post": {
+        "summary": "Record Feedback",
+        "operationId": "record_feedback_feedback__token__post",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ]
+      }
+    },
+    "/resolution/{token}": {
+      "get": {
+        "summary": "Resolution Template",
+        "operationId": "resolution_template_resolution__token__get",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Supporting APIs"
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Body_document_upload_api_documents_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "default": "document"
+          },
+          "step": {
+            "type": "string",
+            "title": "Step",
+            "default": ""
+          },
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "default": ""
+          },
+          "order_type": {
+            "type": "string",
+            "title": "Order Type",
+            "default": ""
+          },
+          "order_reason": {
+            "type": "string",
+            "title": "Order Reason",
+            "default": ""
+          },
+          "release": {
+            "type": "string",
+            "title": "Release",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_document_upload_api_documents_post"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "FalloutAssistSettings": {
+        "type": "object",
+        "properties": {
+          "retrieval_top_k": {
+            "type": "integer",
+            "default": 20,
+            "description": "Usable tickets requested from each retrieval source. Either can return fewer; MCP discovery is capped at 30 candidates."
+          },
+          "rerank_pool_k": {
+            "type": "integer",
+            "default": 20,
+            "description": "Bounded deduplicated comparison pool; must not exceed retrieval_top_k."
+          },
+          "jira_review_top_k": {
+            "type": "integer",
+            "default": 5,
+            "description": "Final drafting sources; must not exceed rerank_pool_k."
+          },
+          "rovo_retrieval_budget_seconds": {
+            "type": "integer",
+            "default": 8,
+            "description": "Rovo retrieval budget seconds"
+          },
+          "local_retrieval_timeout_seconds": {
+            "type": "integer",
+            "default": 10,
+            "description": "Local retrieval timeout seconds"
+          },
+          "routing_rerank_timeout_seconds": {
+            "type": "integer",
+            "default": 10,
+            "description": "Routing rerank timeout seconds"
+          },
+          "rovo_agent_budget_seconds": {
+            "type": "integer",
+            "default": 30,
+            "description": "Rovo agent budget seconds"
+          },
+          "investigation_timeout_seconds": {
+            "type": "integer",
+            "default": 90,
+            "description": "Investigation timeout seconds"
+          },
+          "routing_min_sources": {
+            "type": "integer",
+            "default": 1,
+            "description": "Applicable, actionable, traceable sources needed to stop investigation fallback."
+          },
+          "routing_min_llm_relevance": {
+            "type": "number",
+            "default": 0.75,
+            "description": "Real AI relevance threshold used with applicability and evidence checks, not a success probability."
+          },
+          "rovo_mcp_always_search": {
+            "type": "boolean",
+            "default": true,
+            "description": "Default true: local top K plus MCP top K, then one combined rerank. False restores local-first MCP fallback."
+          },
+          "temperature": {
+            "type": "number",
+            "default": 0.1,
+            "description": "Temperature"
+          },
+          "rerank_temperature": {
+            "type": "number",
+            "default": 0.0,
+            "description": "Rerank temperature"
+          },
+          "llm_rerank_enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Llm rerank enabled"
+          },
+          "semantic_cache_enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Semantic cache enabled"
+          },
+          "semantic_cache_backend": {
+            "type": "string",
+            "default": "redis",
+            "description": "Semantic cache backend"
+          },
+          "semantic_cache_threshold": {
+            "type": "number",
+            "default": 0.97,
+            "description": "Semantic cache threshold"
+          },
+          "semantic_cache_ttl_minutes": {
+            "type": "integer",
+            "default": 60,
+            "description": "Semantic cache ttl minutes"
+          },
+          "semantic_cache_max_entries": {
+            "type": "integer",
+            "default": 1000,
+            "description": "Semantic cache max entries"
+          },
+          "retrieval_weight": {
+            "type": "number",
+            "default": 0.25,
+            "description": "Retrieval weight"
+          },
+          "llm_rerank_weight": {
+            "type": "number",
+            "default": 0.5,
+            "description": "Llm rerank weight"
+          },
+          "human_feedback_weight": {
+            "type": "number",
+            "default": 0.25,
+            "description": "Human feedback weight"
+          },
+          "min_match_score": {
+            "type": "number",
+            "default": 0.7,
+            "description": "Min match score"
+          },
+          "publish_enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Allows Jira posting during scans only when dry_run is false and evidence/review checks pass."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": true,
+            "description": "True saves scan previews without posting. Manual previews and knowledge jobs never post."
+          },
+          "ingest_interval_minutes": {
+            "type": "integer",
+            "default": 60,
+            "description": "History refresh interval in minutes. Zero disables automatic ingestion."
+          },
+          "scan_interval_minutes": {
+            "type": "integer",
+            "default": 5,
+            "description": "New-ticket scan interval in minutes. Zero disables automatic scans."
+          },
+          "langfuse_enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Langfuse enabled"
+          },
+          "public_base_url": {
+            "type": "string",
+            "default": "http://localhost:8010",
+            "description": "Public base url"
+          },
+          "allow_mass_prune": {
+            "type": "boolean",
+            "default": false,
+            "description": "Allow mass prune"
+          }
+        },
+        "description": "All runtime settings. PUT accepts a partial object. Weights must sum to 1 and drafting/pool K must fit retrieval K.",
+        "additionalProperties": false
+      },
+      "FalloutAssistConnectionsUpdate": {
+        "type": "object",
+        "properties": {
+          "JIRA_BASE_URL": {
+            "type": "string",
+            "description": "Jira base url"
+          },
+          "JIRA_EMAIL": {
+            "type": "string",
+            "description": "Jira email"
+          },
+          "JIRA_API_TOKEN": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "JIRA_HISTORY_BACKEND": {
+            "type": "string",
+            "description": "Jira history backend"
+          },
+          "JIRA_INGEST_JQL": {
+            "type": "string",
+            "description": "Jira ingest jql"
+          },
+          "JIRA_INFLOW_JQL": {
+            "type": "string",
+            "description": "Jira inflow jql"
+          },
+          "JIRA_FEEDBACK_FIELD_ID": {
+            "type": "string",
+            "description": "Jira feedback field id"
+          },
+          "JIRA_SUGGESTED_WORKAROUND_FIELD_ID": {
+            "type": "string",
+            "description": "Jira suggested workaround field id"
+          },
+          "ROVO_CLOUD_ID": {
+            "type": "string",
+            "description": "Rovo cloud id"
+          },
+          "ROVO_EMAIL": {
+            "type": "string",
+            "description": "Rovo email"
+          },
+          "ROVO_API_TOKEN": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "SALESFORCE_INSTANCE_URL": {
+            "type": "string",
+            "description": "Salesforce instance url"
+          },
+          "SALESFORCE_ACCESS_TOKEN": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "SALESFORCE_API_VERSION": {
+            "type": "string",
+            "description": "Salesforce api version"
+          },
+          "AZURE_OPENAI_ENDPOINT": {
+            "type": "string",
+            "description": "Azure openai endpoint"
+          },
+          "AZURE_OPENAI_API_KEY": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "AZURE_OPENAI_CHAT_DEPLOYMENT": {
+            "type": "string",
+            "description": "Azure openai chat deployment"
+          },
+          "AZURE_OPENAI_API_VERSION": {
+            "type": "string",
+            "description": "Azure openai api version"
+          },
+          "EMBEDDING_MODEL": {
+            "type": "string",
+            "description": "Embedding model"
+          },
+          "FEEDBACK_SECRET": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "LANGFUSE_PUBLIC_KEY": {
+            "type": "string",
+            "description": "Langfuse public key"
+          },
+          "LANGFUSE_SECRET_KEY": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "LANGFUSE_BASE_URL": {
+            "type": "string",
+            "description": "Langfuse base url"
+          },
+          "TLS_CA_BUNDLE": {
+            "type": "string",
+            "description": "Tls ca bundle"
+          },
+          "KNOWLEDGE_ROUTER_API_KEY": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Legacy single FalloutAssist key; prefer POST /api/falloutassist-api-keys to create named keys."
+          },
+          "SEMANTIC_CACHE_REDIS_URL": {
+            "type": "string",
+            "writeOnly": true,
+            "format": "password",
+            "description": "Secret: omit to preserve; empty string clears it."
+          },
+          "SEMANTIC_CACHE_NAMESPACE": {
+            "type": "string",
+            "description": "Semantic cache namespace"
+          }
+        },
+        "additionalProperties": false
+      },
+      "FalloutAssistConnections": {
+        "type": "object",
+        "properties": {
+          "values": {
+            "type": "object",
+            "description": "Non-secret connection configuration."
+          },
+          "secrets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Whether each secret is configured. Secret values are never returned."
+          }
+        }
+      },
+      "FalloutAssistJobRequest": {
+        "type": "object",
+        "properties": {
+          "issue_key": {
+            "type": "string",
+            "examples": [
+              "SAC-12345"
+            ]
+          },
+          "source_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "default": [],
+            "description": "Optional historical keys for the separate Rovo proposal."
+          }
+        },
+        "required": [
+          "issue_key"
+        ]
+      },
+      "FalloutAssistJobAccepted": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "issue_key": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running"
+            ]
+          },
+          "deduplicated": {
+            "type": "boolean"
+          },
+          "status_url": {
+            "type": "string",
+            "description": "Poll this relative URL with the same Bearer key."
+          }
+        }
+      },
+      "FalloutAssistJobStatus": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "issue_key": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "ready",
+              "partial",
+              "failed"
+            ]
+          },
+          "progress": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "schema_version": {
+                    "type": "string"
+                  },
+                  "package_id": {
+                    "type": "string"
+                  },
+                  "generated_at": {
+                    "type": "string"
+                  },
+                  "issue": {
+                    "type": "object"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "ready",
+                      "partial",
+                      "failed"
+                    ]
+                  },
+                  "proposals": {
+                    "type": "object",
+                    "properties": {
+                      "falloutassist": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string"
+                          },
+                          "confidence": {
+                            "type": "string",
+                            "enum": [
+                              "",
+                              "low",
+                              "medium",
+                              "high"
+                            ]
+                          },
+                          "review_required": {
+                            "type": "boolean",
+                            "description": "If true, the consuming service must obtain human review before acting."
+                          },
+                          "reasoning": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "final_suggestion": {
+                            "type": "object",
+                            "properties": {
+                              "decline": {
+                                "type": "boolean"
+                              },
+                              "reason": {
+                                "type": "string"
+                              },
+                              "steps": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "text": {
+                                      "type": "string"
+                                    },
+                                    "source_key": {
+                                      "type": "string"
+                                    },
+                                    "source_excerpt": {
+                                      "type": "string"
+                                    },
+                                    "supporting_sources": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "source_key": {
+                                            "type": "string"
+                                          },
+                                          "source_excerpt": {
+                                            "type": "string"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "source_keys": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "source_details": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "key": {
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "type": "string"
+                                },
+                                "origins": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "retrieval_route": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "stage": {
+                                  "type": "string"
+                                },
+                                "status": {
+                                  "type": "string"
+                                },
+                                "reason": {
+                                  "type": "string"
+                                },
+                                "elapsed_ms": {
+                                  "type": "integer"
+                                },
+                                "candidate_count": {
+                                  "type": "integer"
+                                },
+                                "requested_top_k": {
+                                  "type": "integer"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "rovo_a2a": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string"
+                          },
+                          "suggestion": {
+                            "type": "object",
+                            "properties": {
+                              "text": {
+                                "type": "string"
+                              },
+                              "review_required": {
+                                "type": "boolean"
+                              },
+                              "task_id": {
+                                "type": "string"
+                              },
+                              "engine": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "sources": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "key": {
+                                  "type": "string"
+                                },
+                                "url": {
+                                  "type": "string"
+                                },
+                                "origins": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          },
+                          "retrieval": {
+                            "type": "object"
+                          },
+                          "knowledge_evidence": {
+                            "type": "array",
+                            "items": {
+                              "type": "object"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "execution_guidance": {
+                    "type": "object",
+                    "properties": {
+                      "may_execute": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "required_checks": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FalloutAssistPreviewRequest": {
+        "type": "object",
+        "properties": {
+          "issue_key": {
+            "type": "string"
+          },
+          "local_only": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "issue_key"
+        ]
+      },
+      "FalloutAssistPreview": {
+        "type": "object",
+        "properties": {
+          "issue_key": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "review_required": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "comment_body": {
+            "type": "string",
+            "description": "Preview text only; no Jira comment was posted."
+          },
+          "source_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "origins": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "retrieval_route": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "elapsed_ms": {
+                  "type": "integer"
+                },
+                "candidate_count": {
+                  "type": "integer"
+                },
+                "requested_top_k": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "supervisor_result": {
+            "type": "object",
+            "properties": {
+              "draft": {
+                "type": "object",
+                "properties": {
+                  "decline": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "type": "string"
+                        },
+                        "source_key": {
+                          "type": "string"
+                        },
+                        "source_excerpt": {
+                          "type": "string"
+                        },
+                        "supporting_sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "source_key": {
+                                "type": "string"
+                              },
+                              "source_excerpt": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "confidence": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "FalloutAssistIngestRequest": {
+        "type": "object",
+        "properties": {
+          "full": {
+            "type": "boolean",
+            "default": false,
+            "description": "False performs incremental refresh; true rebuilds vectors. Both use the saved authoritative history JQL."
+          }
+        }
+      },
+      "FalloutAssistIngestResult": {
+        "type": "object",
+        "properties": {
+          "fetched": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "indexed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "changed_documents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "new_documents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated_documents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "removed_documents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "busy": {
+            "type": "boolean"
+          },
+          "full_rebuild": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "quality_counts": {
+            "type": "object"
+          }
+        }
+      },
+      "FalloutAssistIngestionStatus": {
+        "type": "object",
+        "properties": {
+          "running": {
+            "type": "boolean"
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "stored": {
+                "type": "integer"
+              },
+              "searchable": {
+                "type": "integer"
+              },
+              "excluded": {
+                "type": "integer"
+              }
+            }
+          },
+          "last_completed_run": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "fetched": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "indexed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "changed_documents": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "new_documents": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "updated_documents": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "removed_documents": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "skipped": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "busy": {
+                    "type": "boolean"
+                  },
+                  "full_rebuild": {
+                    "type": "boolean"
+                  },
+                  "created_at": {
+                    "type": "string"
+                  },
+                  "quality_counts": {
+                    "type": "object"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest successful run. Older runs may lack new/updated/removed counts; missing does not mean zero."
+          },
+          "configuration": {
+            "type": "object",
+            "properties": {
+              "history_jql": {
+                "type": "string"
+              },
+              "inflow_jql": {
+                "type": "string"
+              },
+              "settings": {
+                "$ref": "#/components/schemas/FalloutAssistSettings"
+              }
+            }
+          }
+        }
+      },
+      "FalloutAssistJqlPreviewRequest": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "history",
+              "inflow"
+            ]
+          },
+          "jql": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "kind",
+          "jql"
+        ]
+      },
+      "FalloutAssistApiKeyCreate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "FalloutAssistApiKeyRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "FalloutAssistApiKeyCreated": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "writeOnly": true,
+            "description": "Plaintext key returned once at creation."
+          },
+          "record": {
+            "$ref": "#/components/schemas/FalloutAssistApiKeyRecord"
+          }
+        }
+      },
+      "FalloutAssistApiKeyList": {
+        "type": "object",
+        "properties": {
+          "created_count": {
+            "type": "integer"
+          },
+          "active_count": {
+            "type": "integer"
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FalloutAssistApiKeyRecord"
+            }
+          }
+        }
+      },
+      "FalloutAssistApiKeyRevoked": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "FalloutAssistApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "FalloutAssist API key. Enter only the generated key, without the Bearer prefix."
+      },
+      "BrowserCSRF": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "description": "Dashboard-only alternative: call /api/session in the same browser, then use its CSRF token and session cookie."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Main APIs",
+      "description": "Request a workaround, submit/poll agent jobs, or run an explicitly requested new-ticket scan."
+    },
+    {
+      "name": "Ingestion APIs",
+      "description": "Other important APIs: stored Jira totals, new/updated ingestion counts, history refresh/rebuild and JQL previews."
+    },
+    {
+      "name": "Configuration APIs",
+      "description": "Other important APIs: all retrieval, top-K, reranking, cache, scheduler, publishing and connection settings."
+    },
+    {
+      "name": "Documents and SOP APIs",
+      "description": "Upload, inspect, index or remove SOP/reference documents."
+    },
+    {
+      "name": "Rovo Agent APIs",
+      "description": "Rovo A2A connection status, browser OAuth and separate resolution previews."
+    },
+    {
+      "name": "Supporting APIs",
+      "description": "Evidence, saved reviews, workarounds, rules, feedback, audit and browser session support."
+    }
+  ],
+  "servers": [
+    {
+      "url": "/",
+      "description": "The current FalloutAssist deployment origin."
+    }
+  ]
+}

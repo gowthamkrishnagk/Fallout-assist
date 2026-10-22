@@ -11,6 +11,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 from . import storage
 from .config import VECTOR_DIR, config_value
+from .embedding_text import EmbeddingWindow
+
+EMBEDDING_INDEX_VERSION = "token-passages-v2"
 
 
 def field(text: str, *names: str) -> str:
@@ -46,6 +49,7 @@ def extract_error_code(text: str) -> str:
     """Extract explicit short error codes without mistaking a leading year for one."""
     value = (text or "").strip()
     patterns = (
+        r"^\s*\[?(-?\d{1,6})\]?\s*$",
         r"(?i)\b(?:error\s*code|status\s*code|http(?:\s+status)?)\s*[:=# ]+([A-Z][A-Z0-9_-]*|-?\d{1,6})\b",
         r"(?i)\berror\s*[:=#]\s*([A-Z][A-Z0-9_-]*|-?\d{1,6})\b",
         r"^\s*\[?([A-Z][A-Z0-9_-]{1,30}|-?\d{1,6})\]?\s*(?:(?:\||:|-|–)|(?=\s+[A-Z]))",
@@ -66,9 +70,14 @@ def _code(text: str) -> str:
 
 
 @lru_cache(maxsize=2)
+def _embeddings_for_model(model_name: str) -> HuggingFaceEmbeddings:
+    return HuggingFaceEmbeddings(model_name=model_name)
+
+
+@lru_cache(maxsize=2)
 def _store_for_model(model_name: str) -> Chroma:
     VECTOR_DIR.mkdir(parents=True, exist_ok=True)
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
+    embeddings = _embeddings_for_model(model_name)
     return Chroma(collection_name="jira_history_v1", embedding_function=embeddings,
                   persist_directory=str(VECTOR_DIR),
                   collection_metadata={"hnsw:space": "cosine"})
@@ -76,6 +85,11 @@ def _store_for_model(model_name: str) -> Chroma:
 
 def _store() -> Chroma:
     return _store_for_model(config_value("EMBEDDING_MODEL"))
+
+
+def _embedding_window() -> EmbeddingWindow:
+    client = _embeddings_for_model(config_value("EMBEDDING_MODEL"))._client
+    return EmbeddingWindow(client.tokenizer, client.max_seq_length)
 
 
 class HistoryIndex:
@@ -91,20 +105,37 @@ class HistoryIndex:
     def upsert_many(self, items: list[dict]) -> None:
         if not items:
             return
-        documents = [Document(
-            page_content=(f"Order Reason: {item.get('order_reason', '')}\n"
-                          f"Failed Step: {item['step']}\nError: {item['error']}\n"
-                          f"Summary: {item['summary'][:300]}"),
-            metadata={"source_key": item["source_key"]},
-        ) for item in items]
-        _store().add_documents(documents, ids=[item["source_key"] for item in items])
+        store, window = _store(), _embedding_window()
+        keys = list(dict.fromkeys(item["source_key"] for item in items))
+        # Source identity is stable even when its vector passage count changes.
+        # Delete by metadata so retries/re-indexes cannot leave old tail vectors.
+        store.delete(where={"source_key": {"$in": keys}})
+        documents, identifiers = [], []
+        for item in items:
+            key = item["source_key"]
+            context = {**item, "error_code": extract_error_code(item.get("error", ""))}
+            metadata = {"source_key": key, "embedding_version": EMBEDDING_INDEX_VERSION}
+            documents.append(Document(page_content=window.failure_text(context), metadata=metadata))
+            identifiers.append(key)
+            body = item.get("workaround_text") or item.get("body") or ""
+            prefix = window.failure_text(context, max(24, window.limit // 3))
+            for number, passage in enumerate(window.passages(body, prefix), 1):
+                documents.append(Document(page_content=passage, metadata=metadata))
+                identifiers.append(f"{key}::passage:{number}")
+            # Bound embedding batches rather than holding a corpus of vectors.
+            while len(documents) >= 64:
+                store.add_documents(documents[:64], ids=identifiers[:64])
+                del documents[:64]
+                del identifiers[:64]
+        if documents:
+            store.add_documents(documents, ids=identifiers)
 
     def delete(self, key: str) -> None:
         self.delete_many([key])
 
     def delete_many(self, keys: list[str]) -> None:
         if keys:
-            _store().delete(ids=keys)
+            _store().delete(where={"source_key": {"$in": keys}})
 
     def search(self, query_text: str, top_k: int, min_score: float,
                exclude_keys: set[str]) -> dict:
@@ -118,18 +149,23 @@ class HistoryIndex:
         vector_scores: dict[str, float] = {}
         dense_keys: list[str] = []
         try:
+            query = _embedding_window().failure_text({
+                "error_code": extract_error_code(error), "error": error, "step": step,
+                "order_reason": order_reason, "summary": summary})
             for doc, distance in _store().similarity_search_with_score(
-                    f"Order Reason: {order_reason}\nFailed Step: {step}\nError: {error}\nSummary: {summary}",
-                    k=min(100, top_k * 4)):
+                    query, k=min(400, max(16, top_k * 8))):
                 key = doc.metadata.get("source_key", "")
                 if key:
-                    dense_keys.append(key)
-                    vector_scores[key] = max(0.0, min(1.0, 1.0 - float(distance)))
+                    if key not in vector_scores:
+                        dense_keys.append(key)
+                    vector_scores[key] = max(vector_scores.get(key, 0.0),
+                                             max(0.0, min(1.0, 1.0 - float(distance))))
         except Exception as exc:
             # An empty index is valid before the first ingest; other errors must surface.
             if storage.all_document_keys():
                 raise RuntimeError("Historical vector search failed") from exc
-        lexical_keys = storage.lexical_keys(f"{step} {error}", min(100, top_k * 4))
+        lexical_keys = storage.lexical_keys(f"{step} {error}" if step or error else summary,
+                                            min(100, top_k * 4), error=error)
         # Reciprocal rank fusion combines ranks without assuming vector and text
         # search scores share a scale: score(d) = sum(1 / (60 + rank(d))).
         rrf_scores: dict[str, float] = {}
@@ -153,7 +189,12 @@ class HistoryIndex:
             retrieval_score = min(1.0, rrf_score / max_rrf)
             candidates.append({
                 "type": row["source_type"], "key": key, "summary": row["summary"],
-                "url": row["url"], "comment": row["body"], "step": row["step"],
+                "url": (storage.settings()["public_base_url"].rstrip("/") + row["url"]
+                        if row["source_type"] == "doc" and row["url"].startswith("/") else row["url"]),
+                "comment": row["body"], "step": row["step"],
+                "filename": (row.get("metadata") or {}).get("filename", ""),
+                "kind": (row.get("metadata") or {}).get("kind", ""),
+                "chunk_count": (row.get("metadata") or {}).get("chunk_count", 1),
                 "error": row["error"], "order_reason": (row.get("metadata") or {}).get("order_reason", ""),
                 "order_type": (row.get("metadata") or {}).get("order_type", ""),
                 "release": (row.get("metadata") or {}).get("release", ""),

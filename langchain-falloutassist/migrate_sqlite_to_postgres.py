@@ -14,9 +14,9 @@ from falloutassist_next.config import DATABASE_PATH, DEFAULTS
 
 
 TABLES = (
-    "settings", "connection_config", "source_quality", "source_docs", "app_state", "users", "rules",
+    "settings", "connection_config", "source_quality", "source_docs", "app_state", "rules",
     "investigations", "publications", "feedback", "audit_events", "leases",
-    "scan_state",
+    "scan_state", "uploaded_documents", "integration_secrets",
 )
 
 

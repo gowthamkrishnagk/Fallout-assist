@@ -7,7 +7,9 @@ import base64
 import json
 import os
 import re
+import secrets
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -101,6 +103,22 @@ def initialize() -> None:
             value TEXT NOT NULL,
             changed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS integration_secrets (
+            key TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            changed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS falloutassist_api_keys (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            key_prefix TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_falloutassist_api_keys_active
+            ON falloutassist_api_keys(revoked_at, created_at);
         CREATE TABLE IF NOT EXISTS source_quality (
             source_type TEXT NOT NULL,
             source_key TEXT NOT NULL,
@@ -125,6 +143,22 @@ def initialize() -> None:
             content_hash TEXT NOT NULL,
             indexed_at TEXT NOT NULL,
             metadata_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS uploaded_documents (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            file_base64 TEXT NOT NULL,
+            text_content TEXT NOT NULL,
+            context_json TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            searchable_chunks INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            uploaded_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS workaround_patterns (
             pattern_key TEXT PRIMARY KEY,
@@ -172,11 +206,18 @@ def initialize() -> None:
         CREATE TABLE IF NOT EXISTS app_state (
             key TEXT PRIMARY KEY, value TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL, role TEXT NOT NULL,
-            created_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS semantic_cache (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL,
+            query_hash TEXT NOT NULL,
+            vector_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            trace_id TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_semantic_cache_scope ON semantic_cache(scope,created_at);
+        DROP TABLE IF EXISTS users;
         CREATE TABLE IF NOT EXISTS rules (
             id TEXT PRIMARY KEY, status TEXT NOT NULL,
             error_pattern TEXT NOT NULL, failed_step TEXT NOT NULL DEFAULT '',
@@ -287,6 +328,46 @@ def settings() -> dict:
     return validated_settings(values)
 
 
+def semantic_cache_entries(scope: str, ttl_minutes: int, limit: int) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=ttl_minutes)).isoformat()
+    with connect() as db:
+        return [dict(row) for row in db.execute(
+            "SELECT * FROM semantic_cache WHERE scope=? AND expires_at>? AND created_at>? "
+            "ORDER BY created_at DESC,id DESC LIMIT ?", (scope, now.isoformat(), cutoff, limit))]
+
+
+def put_semantic_cache(item: dict, ttl_minutes: int, max_entries: int) -> None:
+    now = datetime.now(timezone.utc)
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if isinstance(db, PostgresConnection):
+            db.execute("LOCK TABLE semantic_cache IN EXCLUSIVE MODE")
+        db.execute("DELETE FROM semantic_cache WHERE expires_at<=?", (now.isoformat(),))
+        db.execute(
+            "INSERT INTO semantic_cache(id,scope,query_hash,vector_json,result_json,trace_id,created_at,expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+            "vector_json=excluded.vector_json,result_json=excluded.result_json,trace_id=excluded.trace_id,"
+            "created_at=excluded.created_at,expires_at=excluded.expires_at",
+            (item["id"], item["scope"], item["query_hash"], _json(item["vector"]),
+             _json(item["result"]), item.get("trace_id"), now.isoformat(),
+             (now + timedelta(minutes=ttl_minutes)).isoformat()))
+        db.execute("DELETE FROM semantic_cache WHERE id NOT IN "
+                   "(SELECT id FROM semantic_cache ORDER BY created_at DESC,id DESC LIMIT ?)", (max_entries,))
+
+
+def clear_semantic_cache(actor: str) -> None:
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM semantic_cache")
+        # All workers hash this generation into their scope. This also prevents
+        # in-flight writes from making an old result reusable after a clear.
+        db.execute("INSERT INTO app_state(key,value) VALUES (?,?) "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                   ("semantic_cache_generation", os.urandom(16).hex()))
+        _append_audit(db, actor, "semantic_cache_cleared", "reranker", {})
+
+
 def _cipher():
     from cryptography.fernet import Fernet
     material = hashlib.sha256(("falloutassist-config-v1:" + session_secret()).encode()).digest()
@@ -302,6 +383,113 @@ def connection_value(key: str) -> str | None:
         return None
     value = row["value"]
     return _cipher().decrypt(value.encode()).decode() if key in SECRET_KEYS else value
+
+
+def create_falloutassist_api_key(name: str, actor: str) -> dict:
+    """Create a named bearer key; persist only its SHA-256 verifier and metadata."""
+    name = name.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}", name):
+        raise ValueError("Key name must be 1-64 letters, numbers, spaces, dots, underscores or hyphens")
+    token = "fa_" + secrets.token_urlsafe(32)
+    key_id = uuid.uuid4().hex
+    created_at = utc_now()
+    record = {"id": key_id, "name": name, "prefix": token[:11],
+              "created_at": created_at, "last_used_at": None, "revoked_at": None}
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO falloutassist_api_keys(id,name,key_hash,key_prefix,created_at) "
+                   "VALUES (?,?,?,?,?)",
+                   (key_id, name, hashlib.sha256(token.encode()).hexdigest(),
+                    record["prefix"], created_at))
+        _append_audit(db, actor, "falloutassist_api_key_created", key_id,
+                      {"name": name, "prefix": record["prefix"]})
+    return {"key": token, "record": record}
+
+
+def falloutassist_api_keys() -> dict:
+    with connect() as db:
+        rows = db.execute("SELECT id,name,key_prefix,created_at,last_used_at,revoked_at "
+                          "FROM falloutassist_api_keys ORDER BY created_at DESC").fetchall()
+    keys = [{"id": row["id"], "name": row["name"], "prefix": row["key_prefix"],
+             "created_at": row["created_at"], "last_used_at": row["last_used_at"],
+             "revoked_at": row["revoked_at"], "active": row["revoked_at"] is None}
+            for row in rows]
+    return {"created_count": len(keys), "active_count": sum(key["active"] for key in keys),
+            "keys": keys}
+
+
+def validate_falloutassist_api_key(token: str) -> bool:
+    """Check a named key and record last use; never expose its verifier."""
+    if not token or len(token) > 256:
+        return False
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with connect() as db:
+        row = db.execute("SELECT id,key_hash FROM falloutassist_api_keys "
+                         "WHERE key_hash=? AND revoked_at IS NULL", (digest,)).fetchone()
+        if not row or not secrets.compare_digest(digest, row["key_hash"]):
+            return False
+        db.execute("UPDATE falloutassist_api_keys SET last_used_at=? WHERE id=?",
+                   (utc_now(), row["id"]))
+    return True
+
+
+def revoke_falloutassist_api_key(key_id: str, actor: str) -> bool:
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT id,name,key_prefix,revoked_at FROM falloutassist_api_keys "
+                         "WHERE id=?", (key_id,)).fetchone()
+        if not row:
+            return False
+        if row["revoked_at"] is None:
+            revoked_at = utc_now()
+            db.execute("UPDATE falloutassist_api_keys SET revoked_at=? WHERE id=?",
+                       (revoked_at, key_id))
+            _append_audit(db, actor, "falloutassist_api_key_revoked", key_id,
+                          {"name": row["name"], "prefix": row["key_prefix"]})
+    return True
+
+
+def integration_secret(key: str, *, consume: bool = False) -> dict | None:
+    """Internal OAuth state, encrypted and excluded from connection snapshots."""
+    if not key.startswith("rovo_a2a:"):
+        raise ValueError("Unknown integration")
+    with connect() as db:
+        if consume:
+            row = db.execute("DELETE FROM integration_secrets WHERE key=? RETURNING payload", (key,)).fetchone()
+        else:
+            row = db.execute("SELECT payload FROM integration_secrets WHERE key=?", (key,)).fetchone()
+    return json.loads(_cipher().decrypt(row["payload"].encode()).decode()) if row else None
+
+
+def save_integration_secret(key: str, value: dict) -> None:
+    if not key.startswith("rovo_a2a:"):
+        raise ValueError("Unknown integration")
+    encrypted = _cipher().encrypt(_json(value).encode()).decode()
+    with connect() as db:
+        db.execute("INSERT INTO integration_secrets(key,payload,changed_at) VALUES (?,?,?) "
+                   "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,changed_at=excluded.changed_at",
+                   (key, encrypted, utc_now()))
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+        db.execute("DELETE FROM integration_secrets WHERE key LIKE ? AND changed_at<?", ("rovo_a2a:pending:%", cutoff))
+        history_cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        db.execute("DELETE FROM integration_secrets WHERE key LIKE ? AND changed_at<?",
+                   ("rovo_a2a:history:%", history_cutoff))
+        knowledge_cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        db.execute("DELETE FROM integration_secrets WHERE key LIKE ? AND changed_at<?",
+                   ("rovo_a2a:knowledge:%", knowledge_cutoff))
+        refresh_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        db.execute("DELETE FROM integration_secrets WHERE key LIKE ? AND changed_at<?",
+                   ("rovo_a2a:refresh:%", refresh_cutoff))
+        jobs_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        db.execute("DELETE FROM integration_secrets WHERE key LIKE ? AND changed_at<?",
+                   ("rovo_a2a:knowledge_job:%", jobs_cutoff))
+
+
+def delete_integration_secrets() -> None:
+    with connect() as db:
+        db.execute("DELETE FROM integration_secrets WHERE key LIKE ? "
+                   "AND key NOT LIKE ? AND key<>?",
+                   ("rovo_a2a:%", "rovo_a2a:knowledge_job:%", "rovo_a2a:knowledge_queue"))
 
 
 def connection_snapshot() -> dict:
@@ -322,6 +510,22 @@ def update_connection_config(changes: dict, actor: str) -> dict:
         if not isinstance(value, str) or len(value) > (4000 if key.endswith("_JQL") else 500):
             raise ValueError(f"Invalid value for {key}")
         value = value.strip()
+        if key == "KNOWLEDGE_ROUTER_API_KEY" and value and len(value) < 32:
+            raise ValueError("Knowledge routing API key must be at least 32 characters")
+        if key == "SEMANTIC_CACHE_REDIS_URL" and value:
+            from urllib.parse import urlsplit
+            try:
+                url = urlsplit(value)
+                valid = url.scheme in {"redis", "rediss"} and url.hostname and not url.query and not url.fragment
+                port = url.port
+                valid = valid and (port is None or 1 <= port <= 65535)
+                valid = valid and (not url.path or re.fullmatch(r"/\d+", url.path))
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError("Redis connection must be a redis:// or rediss:// URL with a valid host, port and database")
+        if key == "SEMANTIC_CACHE_NAMESPACE" and not re.fullmatch(r"[a-z][a-z0-9_]{2,59}", value):
+            raise ValueError("Cache namespace must contain 3–60 lowercase letters, digits or underscores, starting with a letter")
         if key in {"JIRA_BASE_URL", "AZURE_OPENAI_ENDPOINT"} and value and not value.startswith("https://"):
             raise ValueError(f"{key} must use HTTPS")
         if key == "LANGFUSE_BASE_URL" and value and not value.startswith("https://"):
@@ -451,10 +655,31 @@ def source_rows(tier: str = "", limit: int = 200, offset: int = 0) -> list[dict]
     return [{**dict(row), "reasons": json.loads(row["reasons_json"])} for row in rows]
 
 
-def source_counts() -> dict:
+def source_counts(source_type: str = "") -> dict:
     with connect() as db:
-        rows = db.execute("SELECT tier,COUNT(*) AS n FROM source_quality GROUP BY tier").fetchall()
+        rows = db.execute("SELECT tier,COUNT(*) AS n FROM source_quality "
+                          + ("WHERE source_type=? " if source_type else "") + "GROUP BY tier",
+                          (source_type,) if source_type else ()).fetchall()
     return {**{"high": 0, "medium": 0, "low": 0}, **{r["tier"]: r["n"] for r in rows}}
+
+
+def jira_ingestion_counts() -> dict[str, int]:
+    """Count persisted Jira issues, excluding uploaded passages and orphan ratings."""
+    with connect() as db:
+        rows = db.execute("SELECT COALESCE(q.tier,'low') AS tier,COUNT(*) AS n "
+                          "FROM source_docs d LEFT JOIN source_quality q ON "
+                          "q.source_key=d.source_key AND q.source_type=d.source_type "
+                          "WHERE d.source_type='ticket' GROUP BY COALESCE(q.tier,'low')").fetchall()
+    counts = {row["tier"]: int(row["n"]) for row in rows}
+    return {"stored": sum(counts.values()), "searchable": counts.get("high", 0) + counts.get("medium", 0),
+            "excluded": counts.get("low", 0)}
+
+
+def latest_ingestion() -> dict | None:
+    with connect() as db:
+        row = db.execute("SELECT created_at,data_json FROM audit_events WHERE action='ingest_completed' "
+                         "ORDER BY id DESC LIMIT 1").fetchone()
+    return {"created_at": row["created_at"], **json.loads(row["data_json"])} if row else None
 
 
 def source_tier(source_type: str, source_key: str) -> str:
@@ -548,9 +773,12 @@ def remove_document(key: str) -> None:
         db.execute("DELETE FROM source_quality WHERE source_key=?", (key,))
 
 
-def all_document_keys() -> list[str]:
+def all_document_keys(source_type: str = "") -> list[str]:
     with connect() as db:
-        return [r["source_key"] for r in db.execute("SELECT source_key FROM source_docs")]
+        query = "SELECT source_key FROM source_docs"
+        return [r["source_key"] for r in db.execute(
+            query + (" WHERE source_type=?" if source_type else ""),
+            (source_type,) if source_type else ())]
 
 
 def usable_document_count() -> int:
@@ -559,8 +787,9 @@ def usable_document_count() -> int:
     return int(row["n"])
 
 
-def remove_workaround_evidence(source_key: str, keep_version_id: str = "") -> None:
-    """Detach a Jira source from stale workaround versions and repair current status."""
+def remove_workaround_evidence(source_key: str, keep_version_id: str = "",
+                               preserve_history: bool = False) -> None:
+    """Detach stale evidence, optionally keeping a superseded version's provenance."""
     affected: set[str] = set()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -577,6 +806,13 @@ def remove_workaround_evidence(source_key: str, keep_version_id: str = "") -> No
             if sources:
                 db.execute("UPDATE workaround_versions SET source_keys_json=?,updated_at=? WHERE id=?",
                            (_json(sources), utc_now(), version["id"]))
+                continue
+            if preserve_history:
+                # The issue still contains the older Jira comment. Keep its
+                # source link and archived body as a superseded version when
+                # ingestion replaces it with a newer usable procedure.
+                db.execute("UPDATE workaround_versions SET status='superseded',updated_at=? WHERE id=?",
+                           (utc_now(), version["id"]))
                 continue
             outcomes = db.execute("SELECT COUNT(*) AS n FROM workaround_outcomes WHERE version_id=?",
                                   (version["id"],)).fetchone()["n"]
@@ -667,13 +903,17 @@ def record_workaround(item: dict, resolution_at: str = "") -> dict | None:
 
 
 def workaround_rows(order_reason: str = "", step: str = "", error: str = "",
-                    limit: int = 100) -> list[dict]:
+                    limit: int = 100, issue_key: str = "") -> list[dict]:
     clauses, params = [], []
     for column, value in (("p.order_reason", order_reason), ("p.failed_step", step),
                           ("p.error_description", error)):
         if value.strip():
             clauses.append(f"LOWER({column}) LIKE ?")
             params.append(f"%{value.strip().casefold()}%")
+    if issue_key.strip():
+        clauses.append("EXISTS (SELECT 1 FROM workaround_versions v "
+                       "WHERE v.pattern_key=p.pattern_key AND v.source_keys_json LIKE ?)")
+        params.append(f'%"{issue_key.strip().upper()}"%')
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with connect() as db:
         patterns = db.execute("SELECT p.* FROM workaround_patterns p" + where +
@@ -800,9 +1040,14 @@ def uuid4_hex() -> str:
     return uuid.uuid4().hex
 
 
-def lexical_keys(query: str, limit: int) -> list[str]:
+def lexical_keys(query: str, limit: int, *, error: str = "") -> list[str]:
     import re
-    terms = re.findall(r"[A-Za-z0-9_]{2,}", query)[:12]
+    from .history import extract_error_code
+    # Reserve the front of the bounded query for the code and error, before a
+    # long failed-step name. Deduplicate without spending the term budget twice.
+    code = extract_error_code(error or query)
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]+|\d+", f"{code} {error} {query}")
+    terms = list(dict.fromkeys(token.lower() for token in tokens))[:32]
     if not terms:
         return []
     expression = " OR ".join(f'"{term}"' for term in terms)
@@ -812,13 +1057,17 @@ def lexical_keys(query: str, limit: int) -> list[str]:
                 WHERE to_tsvector('simple', coalesce(summary,'') || ' ' ||
                     coalesce(step,'') || ' ' || coalesce(error,'') || ' ' ||
                     coalesce(body,'')) @@ to_tsquery('simple', ?)
-                ORDER BY ts_rank(to_tsvector('simple', coalesce(summary,'') || ' ' ||
-                    coalesce(step,'') || ' ' || coalesce(error,'') || ' ' ||
-                    coalesce(body,'')), to_tsquery('simple', ?)) DESC LIMIT ?""",
+                ORDER BY ts_rank(
+                    setweight(to_tsvector('simple', coalesce(error,'')), 'A') ||
+                    setweight(to_tsvector('simple', coalesce(step,'')), 'B') ||
+                    setweight(to_tsvector('simple', coalesce(summary,'')), 'C') ||
+                    setweight(to_tsvector('simple', coalesce(body,'')), 'D'),
+                    to_tsquery('simple', ?)) DESC, source_key LIMIT ?""",
                 (" | ".join(terms), " | ".join(terms), limit)).fetchall()
         else:
             rows = db.execute("SELECT source_key FROM source_fts WHERE source_fts MATCH ? "
-                              "ORDER BY bm25(source_fts) LIMIT ?", (expression, limit)).fetchall()
+                              "ORDER BY bm25(source_fts,0.0,1.0,2.0,5.0,0.5), source_key LIMIT ?",
+                              (expression, limit)).fetchall()
     return [r["source_key"] for r in rows]
 
 
@@ -852,25 +1101,6 @@ def feedback_stats(candidate_key: str, step: str, error: str,
                 if normalized(row["query_error"] or row["query_step"]) == target]
     return {"up": sum(row["vote"] == "up" for row in matching),
             "down": sum(row["vote"] == "down" for row in matching)}
-
-
-def create_user(user_id: str, email: str, password_hash: str, role: str) -> None:
-    with connect() as db:
-        db.execute("INSERT INTO users(id,email,password_hash,role,created_at) VALUES (?,?,?,?,?)",
-                   (user_id, email.lower(), password_hash, role, utc_now()))
-        _append_audit(db, "system", "user_created", email.lower(), {"role": role})
-
-
-def user_by_email(email: str) -> dict | None:
-    with connect() as db:
-        row = db.execute("SELECT * FROM users WHERE email=?", (email.lower(),)).fetchone()
-    return dict(row) if row else None
-
-
-def user_by_id(user_id: str) -> dict | None:
-    with connect() as db:
-        row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    return dict(row) if row else None
 
 
 def save_rule(item: dict) -> None:

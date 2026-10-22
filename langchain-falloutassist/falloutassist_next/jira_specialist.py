@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from .agent import _scrub, draft_fix
+from .quality import resolution_text
 from .specialists import SpecialistManifest
 
 
@@ -60,7 +61,7 @@ class JiraSuggestionSpecialist:
                      "steps": []}
             agreement = "none"
         elif not local_steps or not rovo_steps:
-            final = dict(branch_drafts.get("local") or branch_drafts.get("rovo"))
+            final = dict(branch_drafts["local"] if local_steps else branch_drafts["rovo"])
             agreement = "single_branch"
         else:
             normalize = lambda text: " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
@@ -111,7 +112,7 @@ class JiraSuggestionSpecialist:
         body = (top.get("comment") or "").strip()
         key = top.get("key") or top.get("filename") or ""
         if "=== fix ===" in body.lower():
-            fix = body[body.lower().index("=== fix ===") + len("=== fix ==="):].strip()
+            fix = resolution_text(body)
         else:
             fix = ""
         if 20 <= len(fix) <= 500:

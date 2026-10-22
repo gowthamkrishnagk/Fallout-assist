@@ -18,9 +18,17 @@ def main() -> None:
         parser.error("Choose --once or --loop")
     storage.initialize()
     next_ingest = next_scan = 0.0
+    previous_intervals = None
     while True:
         settings = storage.settings()
         now = time.monotonic()
+        intervals = (settings["ingest_interval_minutes"], settings["scan_interval_minutes"])
+        if previous_intervals is not None:
+            if intervals[0] != previous_intervals[0]:
+                next_ingest = now + intervals[0] * 60 if intervals[0] else float("inf")
+            if intervals[1] != previous_intervals[1]:
+                next_scan = now + intervals[1] * 60 if intervals[1] else float("inf")
+        previous_intervals = intervals
         if settings["ingest_interval_minutes"] and now >= next_ingest:
             try:
                 print(ingest_once(), flush=True)

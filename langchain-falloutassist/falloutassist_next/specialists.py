@@ -35,6 +35,10 @@ class SpecialistRegistry:
     def get(self, name: str) -> Specialist:
         return self._items[name]
 
+    def manifests(self) -> list[dict]:
+        """Read static graph metadata without querying runtime configuration."""
+        return [asdict(item.manifest) for item in self._items.values()]
+
     def catalog(self) -> list[dict]:
         return [{**asdict(item.manifest), "configured": item.configured()}
                 for item in self._items.values()]

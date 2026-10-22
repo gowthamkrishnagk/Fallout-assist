@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 
 from .agent import PROMPT_VERSION, _bounded_query, chat_model, _scrub
 from .tracing import callback_handler
+from .config import DEFAULTS
+from .semantic_cache import lookup
 
 
 class CandidateScore(BaseModel):
@@ -21,7 +23,8 @@ class RerankResponse(BaseModel):
 
 
 def rerank_candidates(query_text: str, candidates: list[dict], temperature: float,
-                      use_langfuse: bool) -> tuple[dict[str, dict], str | None]:
+                      use_langfuse: bool, settings: dict | None = None,
+                      cache_info: dict | None = None) -> tuple[dict[str, dict], str | None]:
     """Score every candidate once; the caller verifies keys and handles failures."""
     if not candidates:
         return {}, None
@@ -41,6 +44,13 @@ def rerank_candidates(query_text: str, candidates: list[dict], temperature: floa
             "workaround_version": (item.get("workaround_version") or {}).get("version_number"),
             "source_quality": item.get("source_tier", "unknown"),
         })
+    records.sort(key=lambda item: item["source_key"])
+    info = cache_info if cache_info is not None else {}
+    cache, cached, cached_trace = lookup(
+        query_text, _bounded_query(_scrub(query_text)), candidates, temperature,
+        f"{PROMPT_VERSION}-rerank", {**DEFAULTS, **(settings or {})}, info)
+    if cached is not None:
+        return cached, cached_trace
     prompt = (
         "Score how relevant each historical Jira case is to the current failure. "
         "This is ranking only: do not draft a workaround and do not treat similarity "
@@ -78,4 +88,6 @@ def rerank_candidates(query_text: str, candidates: list[dict], temperature: floa
     if set(scored) != expected:
         raise ValueError("Reranker did not return exactly the supplied candidate keys")
     trace_id = getattr(handler, "last_trace_id", None) if handler else None
+    if cache is not None:
+        cache.save(scored, trace_id, info)
     return scored, trace_id

@@ -24,9 +24,22 @@ DEFAULTS = {
     "retrieval_top_k": 20,
     "rerank_pool_k": 20,
     "jira_review_top_k": 5,
+    "rovo_retrieval_budget_seconds": 8,
+    "local_retrieval_timeout_seconds": 10,
+    "routing_rerank_timeout_seconds": 10,
+    "rovo_agent_budget_seconds": 30,
+    "investigation_timeout_seconds": 90,
+    "routing_min_sources": 1,
+    "routing_min_llm_relevance": 0.75,
+    "rovo_mcp_always_search": True,
     "temperature": 0.1,
     "rerank_temperature": 0.0,
     "llm_rerank_enabled": True,
+    "semantic_cache_enabled": True,
+    "semantic_cache_backend": "redis",
+    "semantic_cache_threshold": 0.97,
+    "semantic_cache_ttl_minutes": 60,
+    "semantic_cache_max_entries": 1000,
     "retrieval_weight": 0.25,
     "llm_rerank_weight": 0.50,
     "human_feedback_weight": 0.25,
@@ -40,8 +53,9 @@ DEFAULTS = {
     "allow_mass_prune": False,
 }
 
-# Operational connections are editable by an administrator. The database and
-# session key remain bootstrap settings because both are needed before login.
+# Operational connections are editable in the open dashboard. The database and
+# session key remain startup settings for schema setup, CSRF, OAuth browser state,
+# and encrypted integration settings.
 CONNECTION_DEFAULTS = {
     "JIRA_BASE_URL": "", "JIRA_EMAIL": "", "JIRA_API_TOKEN": "",
     "JIRA_HISTORY_BACKEND": "rovo", "JIRA_INGEST_JQL": "",
@@ -57,9 +71,13 @@ CONNECTION_DEFAULTS = {
     "FEEDBACK_SECRET": "", "LANGFUSE_PUBLIC_KEY": "",
     "LANGFUSE_SECRET_KEY": "", "LANGFUSE_BASE_URL": "",
     "TLS_CA_BUNDLE": "",
+    "KNOWLEDGE_ROUTER_API_KEY": "",
+    "SEMANTIC_CACHE_REDIS_URL": "",
+    "SEMANTIC_CACHE_NAMESPACE": "falloutassist",
 }
 SECRET_KEYS = {"JIRA_API_TOKEN", "ROVO_API_TOKEN", "AZURE_OPENAI_API_KEY",
-               "FEEDBACK_SECRET", "LANGFUSE_SECRET_KEY", "SALESFORCE_ACCESS_TOKEN"}
+               "FEEDBACK_SECRET", "LANGFUSE_SECRET_KEY", "SALESFORCE_ACCESS_TOKEN",
+               "SEMANTIC_CACHE_REDIS_URL", "KNOWLEDGE_ROUTER_API_KEY"}
 
 
 def config_value(name: str) -> str:
@@ -87,9 +105,18 @@ def session_secret() -> str:
 
 def validated_settings(raw: dict) -> dict:
     result = {**DEFAULTS, **raw}
+    if result["semantic_cache_backend"] not in {"redis", "database"}:
+        raise ValueError("semantic_cache_backend must be redis or database")
     for key, minimum, maximum in (
         ("retrieval_top_k", 1, 100), ("rerank_pool_k", 1, 50),
         ("jira_review_top_k", 1, 20),
+        ("rovo_retrieval_budget_seconds", 1, 60),
+        ("local_retrieval_timeout_seconds", 1, 60),
+        ("routing_rerank_timeout_seconds", 1, 60),
+        ("rovo_agent_budget_seconds", 10, 120),
+        ("investigation_timeout_seconds", 30, 300),
+        ("routing_min_sources", 1, 5),
+        ("semantic_cache_ttl_minutes", 1, 1440), ("semantic_cache_max_entries", 1, 10000),
         ("ingest_interval_minutes", 0, 1440), ("scan_interval_minutes", 0, 1440),
     ):
         value = result[key]
@@ -102,14 +129,18 @@ def validated_settings(raw: dict) -> dict:
     if result["jira_review_top_k"] > result["rerank_pool_k"]:
         raise ValueError("jira_review_top_k cannot exceed rerank_pool_k")
     for key in ("temperature", "rerank_temperature", "min_match_score",
-                "retrieval_weight", "llm_rerank_weight", "human_feedback_weight"):
+                "retrieval_weight", "llm_rerank_weight", "human_feedback_weight",
+                "routing_min_llm_relevance"):
         value = result[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
             raise ValueError(f"{key} must be between 0 and 1")
     if abs(sum(result[key] for key in ("retrieval_weight", "llm_rerank_weight",
                                        "human_feedback_weight")) - 1.0) > 0.001:
         raise ValueError("Rerank weights must sum to 1")
-    for key in ("publish_enabled", "dry_run", "langfuse_enabled", "llm_rerank_enabled", "allow_mass_prune"):
+    threshold = result["semantic_cache_threshold"]
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0.90 <= threshold <= 1:
+        raise ValueError("semantic_cache_threshold must be between 0.90 and 1")
+    for key in ("publish_enabled", "dry_run", "langfuse_enabled", "llm_rerank_enabled", "allow_mass_prune", "semantic_cache_enabled", "rovo_mcp_always_search"):
         if not isinstance(result[key], bool):
             raise ValueError(f"{key} must be true or false")
     url = result["public_base_url"]

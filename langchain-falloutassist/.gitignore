@@ -4,3 +4,40 @@ __pycache__/
 *.pyc
 .env
 
+# Local secrets and environment overrides; retain the safe setup template.
+.env.*
+!.env.example
+tls/
+venv/
+.aws/
+.ssh/
+.codex/
+
+# Runtime state, uploaded content, vectors, logs and temporary test databases.
+data/
+logs/
+tmp/
+tmp*/
+.test-tmp/
+output/
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Generated tooling files.
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

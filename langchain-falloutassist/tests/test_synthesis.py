@@ -239,7 +239,7 @@ class PersistenceTests(unittest.TestCase):
         web.app.dependency_overrides[web._admin] = lambda: {"email": "tester"}
         try:
             with TestClient(web.app) as client:
-                csrf = client.get("/api/auth/me").json()["csrf"]
+                csrf = client.get("/api/session").json()["csrf"]
                 url = "/api/workaround-versions/missing/synthesis"
                 self.assertEqual(client.post(url, json={}).status_code, 403)
                 self.assertEqual(client.post(url, json={}, headers={"x-csrf-token": csrf}).status_code, 404)
